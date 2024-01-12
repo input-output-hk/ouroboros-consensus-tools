@@ -9,3 +9,6 @@ tmp/
 /cabal.project.freeze
 dist-newstyle/
 dist/
+
+# beacon default data directory
+beacon-data/

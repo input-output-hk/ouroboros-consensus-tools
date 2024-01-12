@@ -1,5 +1,6 @@
 repository cardano-haskell-packages
   url: https://input-output-hk.github.io/cardano-haskell-packages
+  -- url: https://chap.intersectmbo.org/
   secure: True
   root-keys:
     3e0cce471cf09815f930210f7827266fd09045445d65923e6d0238a6cd15126f
@@ -11,8 +12,8 @@ repository cardano-haskell-packages
 
 -- We try to use the same index state used by 'ouroboros-consensus'.
 index-state:
-  , hackage.haskell.org 2023-11-16T17:05:19Z
-  , cardano-haskell-packages 2023-11-16T12:44:10Z
+  , hackage.haskell.org 2023-12-14T23:57:38Z
+  , cardano-haskell-packages 2023-12-15T13:02:57Z
 
 packages:
   ./beacon
