@@ -4,8 +4,10 @@
       packages = p: [ p.beacon ];
 
       nativeBuildInputs = [
+        pkgs.cairo
         pkgs.jq
         pkgs.gh
+        pkgs.pkg-config
       ];
 
       tools = {
