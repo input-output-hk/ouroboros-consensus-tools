@@ -1,14 +1,15 @@
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE DeriveGeneric     #-}
+{-# LANGUAGE DerivingVia       #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE RecordWildCards   #-}
 
-module Cardano.Beacon.Types
-       ( module Cardano.Beacon.Types
-       , module Text
-       ) where
+module Cardano.Beacon.Types (
+    module Cardano.Beacon.Types
+  , module Text
+  ) where
 
 
+import           Cardano.Beacon.SlotDataPoint (SortedDataPoints)
 import           Control.Applicative ((<|>))
 import           Data.Aeson
 import           Data.List (intercalate)
@@ -16,8 +17,6 @@ import           Data.Text as Text (Text)
 import qualified Data.Text as T (unpack)
 import           Data.Time.Clock (UTCTime)
 import           GHC.Generics (Generic)
-
-import           Cardano.Beacon.SlotDataPoint (SortedDataPoints)
 
 
 data EchoCommand =
@@ -30,8 +29,8 @@ newtype ChainName = ChainName Text
           via Text
 
 data CommitInfo = CommitInfo
-  { ciCommitSHA1  :: !String
-  , ciCommitDate  :: !UTCTime
+  { ciCommitSHA1 :: !String
+  , ciCommitDate :: !UTCTime
   }
   deriving (Show, Generic)
 
@@ -74,19 +73,19 @@ instance FromJSON Version where
   parseJSON = genericParseJSON aesonNoTagFields
 
 data InstallInfo = InstallInfo
-  { installPath     :: FilePath
-  , installNixPath  :: FilePath
-  , installVersion  :: Version
+  { installPath    :: FilePath
+  , installNixPath :: FilePath
+  , installVersion :: Version
   }
   deriving Show
 
 data BeaconRunMeta = BeaconRunMeta {
-    commit      :: CommitInfo
-  , version     :: Version
-  , chain       :: ChainName
-  , nixPath     :: FilePath
-  , host        :: String
-  , date        :: UTCTime
+    commit  :: CommitInfo
+  , version :: Version
+  , chain   :: ChainName
+  , nixPath :: FilePath
+  , host    :: String
+  , date    :: UTCTime
   }
   deriving (Show, Generic)
 

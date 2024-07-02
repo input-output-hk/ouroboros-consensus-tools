@@ -1,11 +1,10 @@
 {-# LANGUAGE LambdaCase #-}
 
-module  Cardano.Beacon.Console
-        ( ConsoleStyle(..)
-
-        , printFatalAndDie
-        , printStyled
-        ) where
+module Cardano.Beacon.Console (
+    ConsoleStyle (..)
+  , printFatalAndDie
+  , printStyled
+  ) where
 
 import           Control.Exception (bracket_)
 import qualified System.Console.ANSI as Console

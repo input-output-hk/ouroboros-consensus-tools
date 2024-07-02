@@ -1,6 +1,6 @@
-{-# LANGUAGE NumericUnderscores #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE NumericUnderscores  #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 -- TODO --
@@ -52,33 +52,31 @@
 -- - [ ] Perform a statistical analysis on the measurements.
 module Main (main) where
 
-import           Control.Concurrent (threadDelay)
-import           Control.Exception (bracket_)
-import           Control.Monad (foldM_, forM_, unless, when)
-import           Control.Monad.Extra (ifM, unlessM)
-import           Data.Aeson (eitherDecodeFileStrict, eitherDecodeStrict', encodeFile)
-import           Data.Either (rights)
-import           Data.List (sort)
-import           Data.Maybe (fromJust)
-import           Data.Monoid
-import           Data.Time.Clock (getCurrentTime)
-import           Data.Version (showVersion)
-import           Text.Printf
-import           Text.Read (readMaybe)
-
-import           Network.HostName
-import           System.Directory
-import           System.Environment (getExecutablePath)
-import           System.FilePath
-
 import           Cardano.Beacon.Chain
 import           Cardano.Beacon.CLI
 import           Cardano.Beacon.Compare
 import           Cardano.Beacon.Console
 import           Cardano.Beacon.Run
 import           Cardano.Beacon.Types
-
+import           Control.Concurrent (threadDelay)
+import           Control.Exception (bracket_)
+import           Control.Monad (foldM_, forM_, unless, when)
+import           Control.Monad.Extra (ifM, unlessM)
+import           Data.Aeson (eitherDecodeFileStrict, eitherDecodeStrict',
+                     encodeFile)
+import           Data.Either (rights)
+import           Data.List (sort)
+import           Data.Maybe (fromJust)
+import           Data.Monoid
+import           Data.Time.Clock (getCurrentTime)
+import           Data.Version (showVersion)
+import           Network.HostName
 import qualified Paths_beacon as Paths (version)
+import           System.Directory
+import           System.Environment (getExecutablePath)
+import           System.FilePath
+import           Text.Printf
+import           Text.Read (readMaybe)
 
 
 --------------------------------------------------------------------------------

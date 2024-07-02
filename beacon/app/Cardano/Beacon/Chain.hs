@@ -1,11 +1,11 @@
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE DeriveGeneric     #-}
+{-# LANGUAGE DerivingVia       #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module  Cardano.Beacon.Chain
-        ( module Cardano.Beacon.Chain
-        ) where
+module Cardano.Beacon.Chain (module Cardano.Beacon.Chain) where
 
+import           Cardano.Beacon.Console
+import           Cardano.Beacon.Types
 import           Control.Exception (SomeException (..), try)
 import           Data.Aeson
 import qualified Data.ByteString as B (readFile)
@@ -13,9 +13,6 @@ import           Data.Map as Map (Map, empty, lookup, size, toAscList)
 import           Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import           GHC.Generics (Generic)
-
-import           Cardano.Beacon.Console
-import           Cardano.Beacon.Types
 
 
 data BeaconChain = BeaconChain {

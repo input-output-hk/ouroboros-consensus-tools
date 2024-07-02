@@ -1,15 +1,17 @@
-{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE NamedFieldPuns    #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 {-# OPTIONS_GHC -fno-warn-unused-top-binds #-}
 
-module  Cardano.Beacon.Compare
-        ( doCompare
-        , doVariance
-        ) where
+module Cardano.Beacon.Compare (
+    doCompare
+  , doVariance
+  ) where
 
-import           Prelude hiding (putStr, putStrLn)
-
+import           Cardano.Beacon.Console
+import           Cardano.Beacon.SlotDataPoint
+import           Cardano.Beacon.Types
+import           Cardano.Slotting.Slot (SlotNo (..))
 import           Control.Arrow ((>>>))
 import           Control.Monad (forM_, unless, when)
 import           Data.Ord (Down (Down), comparing)
@@ -18,15 +20,10 @@ import qualified Data.Set as Set
 import           Data.Vector (Vector)
 import qualified Data.Vector as V
 import           Data.Vector.Algorithms.Merge (sortBy)
-
 import qualified Graphics.Rendering.Chart.Backend.Cairo as Chart.Cairo
 import           Graphics.Rendering.Chart.Easy ((.=))
 import qualified Graphics.Rendering.Chart.Easy as Chart
-
-import           Cardano.Beacon.Console
-import           Cardano.Beacon.SlotDataPoint
-import           Cardano.Beacon.Types
-import           Cardano.Slotting.Slot (SlotNo (..))
+import           Prelude hiding (putStr, putStrLn)
 
 
 doCompare :: BeaconRun -> BeaconRun -> IO ()
@@ -61,8 +58,8 @@ doVariance runs = do
 -- `db-analyser` if we use it as a library.
 
 data Selector = Selector {
-    selName         :: String
-  , selProjection   :: SlotDataPoint -> Double
+    selName       :: String
+  , selProjection :: SlotDataPoint -> Double
   }
 
 selSlot, selMutForecast, selMutBlockApply, selMutTotalTime, selAllocatedBytes :: Selector

@@ -1,17 +1,17 @@
 {-# LANGUAGE DerivingVia #-}
 
-module  Cardano.Beacon.CDF (module Cardano.Beacon.CDF) where
+module Cardano.Beacon.CDF (module Cardano.Beacon.CDF) where
 
 import           Control.Monad (forM_)
 import           Data.Function ((&))
+import           Data.IntervalMap.FingerTree as Intv (Interval (..), bounds,
+                     singleton, union)
 import           Data.List (sort)
 import           Data.Maybe (fromJust)
 import           Data.Ratio
+import qualified Data.Vector.Unboxed as VU
 import           GHC.Real (Ratio ((:%)))
 import           Numeric (readFloat)
-
-import           Data.IntervalMap.FingerTree as Intv (Interval (..), bounds, union, singleton)
-import qualified Data.Vector.Unboxed as VU
 import qualified Statistics.Function as Stat
 import qualified Statistics.Quantile as Stat
 import qualified Statistics.Sample as Stat
@@ -27,7 +27,7 @@ mkQuantile :: String -> Quantile
 mkQuantile x =
   case readFloat x of
     ((n, []) : _) -> Q n
-    _ -> error "Invalid quantile"
+    _             -> error "Invalid quantile"
 
 briefQuantiles :: [Quantile]
 briefQuantiles =
@@ -39,14 +39,14 @@ briefQuantiles =
 
 data CDF =
   CDF
-  { cdfSize      :: Int
-  , cdfAverage   :: Double
-  , cdfMedian    :: Double
-  , cdfStddev    :: Double
-  , cdfMinMax    :: Interval Double
-  , cdfRange     :: Double
-  , cdfSamples   :: [(Quantile, Double)]
-  , cdfSamples2  :: [(Quantile, Double)]
+  { cdfSize     :: Int
+  , cdfAverage  :: Double
+  , cdfMedian   :: Double
+  , cdfStddev   :: Double
+  , cdfMinMax   :: Interval Double
+  , cdfRange    :: Double
+  , cdfSamples  :: [(Quantile, Double)]
+  , cdfSamples2 :: [(Quantile, Double)]
   }
   deriving Show
 

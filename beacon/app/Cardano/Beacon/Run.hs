@@ -1,40 +1,40 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE RecordWildCards   #-}
 
-module  Cardano.Beacon.Run
-        ( ConsoleStyle(..)
-        , RunEnvironment(..)
-
-        , envBeaconDir
-        , envEchoing
-        , envEmpty
-
-        , shellCurlGitHubAPI
-        , shellMergeMetaAndData
-        , shellNixBuildVersion
-        , shellRunDbAnalyser
-        ) where
-
-import           Control.Exception (SomeException (..), try)
-import           Control.Monad (void, when)
-import           Data.ByteString.Char8 as BSC (ByteString, pack, readFile, unpack, writeFile)
-import           Data.Maybe (fromJust)
-import           System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
-import           System.FilePath (isRelative, (</>))
-import           System.Process hiding (env)
+module Cardano.Beacon.Run (
+    ConsoleStyle (..)
+  , RunEnvironment (..)
+  , envBeaconDir
+  , envEchoing
+  , envEmpty
+  , shellCurlGitHubAPI
+  , shellMergeMetaAndData
+  , shellNixBuildVersion
+  , shellRunDbAnalyser
+  ) where
 
 import           Cardano.Beacon.Chain
 import           Cardano.Beacon.CLI (BeaconOptions (..))
 import           Cardano.Beacon.Console
 import           Cardano.Beacon.Types
+import           Control.Exception (SomeException (..), try)
+import           Control.Monad (void, when)
+import           Data.Bool (bool)
+import           Data.ByteString.Char8 as BSC (ByteString, pack, readFile,
+                     unpack, writeFile)
+import           Data.Maybe (fromJust)
+import           System.Directory (createDirectoryIfMissing, doesFileExist,
+                     removeFile)
+import           System.FilePath (isRelative, (</>))
+import           System.Process hiding (env)
 
 
 data RunEnvironment = Env
-  { runChains     :: Maybe Chains
-  , runCommit     :: Maybe CommitInfo
-  , runInstall    :: Maybe InstallInfo
-  , runOptions    :: BeaconOptions
+  { runChains  :: Maybe Chains
+  , runCommit  :: Maybe CommitInfo
+  , runInstall :: Maybe InstallInfo
+  , runOptions :: BeaconOptions
   }
 
 envEchoing :: RunEnvironment -> EchoCommand
@@ -106,7 +106,10 @@ shellNixBuildVersion env ver@Version{verCompiler = compiler} = do
 
 shellRunDbAnalyser :: RunEnvironment -> BeaconChain -> FilePath -> IO ()
 shellRunDbAnalyser env BeaconChain{..} outFile = do
-  _ <- runShellEchoing echoing dbAnalyser dbAnalyserArgs
+  onlyImmutableFlag <-
+    whenTrue "--only-immutable-db" <$> detectDbAnalyserNeedsOnlyImmutable env
+
+  _ <- runShellEchoing echoing dbAnalyser (dbAnalyserArgs <> onlyImmutableFlag)
   callJQ echoing outFile jqToListArgs
   removeFile tempResult
   where
@@ -123,7 +126,6 @@ shellRunDbAnalyser env BeaconChain{..} outFile = do
 
     dbAnalyserArgs = filter (not . null)
       [ "--db", chDir </> chDbDir
-      , "--only-immutable-db"
       , maybe "" (\s -> "--analyse-from " ++ show s) chFromSlot
       , "--benchmark-ledger-ops"
       , "--out-file", tempResult
@@ -138,6 +140,16 @@ shellRunDbAnalyser env BeaconChain{..} outFile = do
       , "'map(inputs)'"
       , tempResult
       ]
+
+    whenTrue t = bool [] [t]
+
+detectDbAnalyserNeedsOnlyImmutable :: RunEnvironment -> IO Bool
+detectDbAnalyserNeedsOnlyImmutable env = do
+  out <- runShellEchoing echoing dbAnalyser ["--help"]
+  return $ "--only-immutable-db" `elem` words out
+  where
+    dbAnalyser  = installPath . fromJust . runInstall $ env
+    echoing     = envEchoing env
 
 shellMergeMetaAndData :: RunEnvironment -> FilePath -> FilePath -> FilePath -> IO ()
 shellMergeMetaAndData env srcMeta srcData dest =

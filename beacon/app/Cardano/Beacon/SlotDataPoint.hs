@@ -1,26 +1,23 @@
-{-# LANGUAGE DerivingVia #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE DerivingVia         #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module Cardano.Beacon.SlotDataPoint
-       ( SlotDataPoint(..)
-       , SortedDataPoints(unPoints)
-
-       , mkSortedDataPoints
-       -- , module SDP
-       ) where
+module Cardano.Beacon.SlotDataPoint (
+    SlotDataPoint (..)
+  , SortedDataPoints (unPoints)
+  , mkSortedDataPoints
+  ) where
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
+import           Cardano.Slotting.Slot (SlotNo)
 import           Data.Aeson
 import           Data.Int
 import           Data.List (sortOn)
 import qualified Data.Vector as V (toList)
 import           Data.Word
 import           Text.Builder (Builder)
-
-import           Cardano.Slotting.Slot (SlotNo)
 -- import           Cardano.Tools.DBAnalyser.Analysis.BenchmarkLedgerOps.SlotDataPoint as SDP
 
 

@@ -1,13 +1,12 @@
-module  Cardano.Beacon.CLI
-        ( BeaconCommand(..)
-        , BeaconOptions(..)
-        , getOpts
-        ) where
-
-import           Data.Text as Text (Text, pack)
-import           Options.Applicative
+module Cardano.Beacon.CLI (
+    BeaconCommand (..)
+  , BeaconOptions (..)
+  , getOpts
+  ) where
 
 import           Cardano.Beacon.Types
+import           Data.Text as Text (Text, pack)
+import           Options.Applicative
 
 
 data BeaconCommand =
@@ -26,10 +25,10 @@ data BeaconCommand =
     deriving Show
 
 data BeaconOptions = BeaconOptions {
-      optEchoing        :: !EchoCommand
-    , optBeaconDir      :: !FilePath
-    , optMachineId      :: !String
-    , optLockFile       :: !FilePath
+      optEchoing   :: !EchoCommand
+    , optBeaconDir :: !FilePath
+    , optMachineId :: !String
+    , optLockFile  :: !FilePath
     }
     deriving Show
 
