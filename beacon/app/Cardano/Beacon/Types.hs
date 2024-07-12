@@ -73,9 +73,10 @@ instance FromJSON Version where
   parseJSON = genericParseJSON aesonNoTagFields
 
 data InstallInfo = InstallInfo
-  { installPath    :: FilePath
-  , installNixPath :: FilePath
-  , installVersion :: Version
+  { installExePath  :: FilePath
+  , installPlanPath :: FilePath
+  , installNixPath  :: FilePath
+  , installVersion  :: Version
   }
   deriving Show
 

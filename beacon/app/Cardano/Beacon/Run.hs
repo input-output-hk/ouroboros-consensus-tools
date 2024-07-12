@@ -26,7 +26,7 @@ import           Data.ByteString.Char8 as BSC (ByteString, pack, readFile,
 import           Data.Maybe (fromJust)
 import           System.Directory (createDirectoryIfMissing, doesFileExist,
                      removeFile)
-import           System.FilePath (isRelative, (</>))
+import           System.FilePath (isRelative, (<.>), (</>))
 import           System.Process hiding (env)
 
 
@@ -77,32 +77,38 @@ shellCurlGitHubAPI env queryPath = do
 
 shellNixBuildVersion :: RunEnvironment -> Version -> IO InstallInfo
 shellNixBuildVersion env ver@Version{verCompiler = compiler} = do
-  exists <- doesFileExist install
+  exists <- doesFileExist exePath
   if exists
     then printStyled StyleInfo "target binary already built and linked"
     else do
       createDirectoryIfMissing False binDir
-      void $ runShellEchoing echoing "nix" nixBuildArgs
+      void $ runShellEchoing echoing "nix" nixBuildExeArgs
+      void $ runShellEchoing echoing "nix" nixBuildPlanArgs
 
-  nix_path <- runShellEchoing echoing "readlink" [output]
-  return $ InstallInfo install (head . lines $ nix_path) ver
+  nix_path <- runShellEchoing echoing "readlink" [outLink]
+  return $ InstallInfo {
+    installExePath = exePath,
+    installPlanPath = planLink,
+    installNixPath = head . lines $ nix_path,
+    installVersion = ver
+  }
   where
-    echoing = envEchoing env
-    sha     = ciCommitSHA1 . fromJust . runCommit $ env
-    binName = take 9 sha ++ "-" ++ compiler
-    binDir  = envBeaconDir env </> "bin"
-    output  = binDir </> binName
-    install = output </> "bin" </> "db-analyser"
+    echoing  = envEchoing env
+    sha      = ciCommitSHA1 . fromJust . runCommit $ env
+    binDir   = envBeaconDir env </> "bin"
+    tag      = take 9 sha ++ "-" ++ compiler
+    outLink  = binDir </> tag
+    planLink = binDir </> tag <.> "plan-json"
+    exePath  = outLink </> "bin" </> "db-analyser"
 
-    nixBuildArgs =
-      [ "build"
-      , "github:IntersectMBO/ouroboros-consensus/"
-          ++ sha
-          ++ "#hydraJobs.x86_64-linux.native."
-          ++ compiler
-          ++ ".exesNoAsserts.ouroboros-consensus-cardano.db-analyser"
-      , "-o", output
-      ]
+    flakeRef    = "github:IntersectMBO/ouroboros-consensus/" ++ sha
+    drvPath     = "hydraJobs.x86_64-linux.native."
+                  ++ compiler
+                  ++ ".exesNoAsserts.ouroboros-consensus-cardano.db-analyser"
+    planDrvPath = drvPath ++ ".src.project.plan-nix.json"
+
+    nixBuildExeArgs = ["build", flakeRef ++ "#" ++ drvPath, "-o", outLink]
+    nixBuildPlanArgs = ["build", flakeRef ++ "#" ++ planDrvPath, "-o", planLink]
 
 shellRunDbAnalyser :: RunEnvironment -> BeaconChain -> FilePath -> IO ()
 shellRunDbAnalyser env BeaconChain{..} outFile = do
@@ -117,7 +123,7 @@ shellRunDbAnalyser env BeaconChain{..} outFile = do
     -- We adhere to those for maximum fidelity of beacon benchmarks.
     rtsOpts = "-T -I0 -A16m -N2 --disable-delayed-os-memory-return"
 
-    dbAnalyser  = installPath . fromJust . runInstall $ env
+    dbAnalyser  = installExePath . fromJust . runInstall $ env
     tempResult  = envBeaconDir env </> "temp.result.json"
     echoing     = envEchoing env
     chDir
@@ -148,7 +154,7 @@ detectDbAnalyserNeedsOnlyImmutable env = do
   out <- runShellEchoing echoing dbAnalyser ["--help"]
   return $ "--only-immutable-db" `elem` words out
   where
-    dbAnalyser  = installPath . fromJust . runInstall $ env
+    dbAnalyser  = installExePath . fromJust . runInstall $ env
     echoing     = envEchoing env
 
 shellMergeMetaAndData :: RunEnvironment -> FilePath -> FilePath -> FilePath -> IO ()

@@ -65,9 +65,10 @@ import           Control.Monad.Extra (ifM, unlessM)
 import           Data.Aeson (eitherDecodeFileStrict, eitherDecodeStrict',
                      encodeFile)
 import           Data.Either (rights)
-import           Data.List (sort)
+import           Data.List (sort, sortBy)
 import           Data.Maybe (fromJust)
 import           Data.Monoid
+import           Data.Ord (Down (..), comparing)
 import           Data.Time.Clock (getCurrentTime)
 import           Data.Version (showVersion)
 import           Network.HostName
@@ -163,7 +164,8 @@ runCommand env@Env{ runCommit = Nothing } cmd@(BeaconBuild ver) = do
   runCommand env' cmd
 runCommand env (BeaconBuild ver) = do
   install <- shellNixBuildVersion env ver
-  printStyled StyleNone $ "installed binary is: " ++ installPath install
+  printStyled StyleNone $ "installed binary is: " ++ installExePath install
+  printStyled StyleNone $ "build plan is available in: " ++ installPlanPath install
   pure env{ runInstall = Just install }
 
 runCommand env@Env{ runChains = Nothing } cmd@(BeaconDoRun bChain _ _) = do
@@ -244,7 +246,7 @@ runCommand env (BeaconVariance slug) = do
 
 nextUnusedFilename :: FilePath -> IO FilePath
 nextUnusedFilename inSlugDir = do
-  fileNamesDesc <- reverse . sort <$> listDirectory inSlugDir
+  fileNamesDesc <- sortBy (comparing Down) <$> listDirectory inSlugDir
   pure
     $ indexedName
     $ maybe 1 (+ 1)
