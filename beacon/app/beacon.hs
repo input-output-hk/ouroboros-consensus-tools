@@ -52,6 +52,9 @@
 -- - [ ] Perform a statistical analysis on the measurements.
 module Main (main) where
 
+import           Cabal.Plan (CompInfo (..), CompName (..), PkgId (..),
+                     PkgName (..), PlanJson (..), Unit (..), Ver,
+                     decodePlanJson, dispCompName, dispCompNameTarget)
 import           Cardano.Beacon.Chain
 import           Cardano.Beacon.CLI
 import           Cardano.Beacon.Compare
@@ -65,11 +68,18 @@ import           Control.Monad.Extra (ifM, unlessM)
 import           Data.Aeson (eitherDecodeFileStrict, eitherDecodeStrict',
                      encodeFile)
 import           Data.Either (rights)
-import           Data.List (sort, sortBy)
-import           Data.Maybe (fromJust)
+import           Data.Foldable (Foldable (..))
+import           Data.Function (on, (&))
+import           Data.List (find, intercalate, intersperse, sort, sortBy)
+import qualified Data.List.NonEmpty as NE
+import           Data.Map (Map)
+import qualified Data.Map as Map
+import           Data.Maybe (fromJust, listToMaybe)
 import           Data.Monoid
 import           Data.Ord (Down (..), comparing)
+import qualified Data.Text as T
 import           Data.Time.Clock (getCurrentTime)
+import           Data.Traversable (for)
 import           Data.Version (showVersion)
 import           Network.HostName
 import qualified Paths_beacon as Paths (version)
@@ -78,6 +88,7 @@ import           System.Environment (getExecutablePath)
 import           System.FilePath
 import           Text.Printf
 import           Text.Read (readMaybe)
+import           Validation (Validation (..))
 
 
 --------------------------------------------------------------------------------
@@ -166,7 +177,8 @@ runCommand env (BeaconBuild ver) = do
   install <- shellNixBuildVersion env ver
   printStyled StyleNone $ "installed binary is: " ++ installExePath install
   printStyled StyleNone $ "build plan is available in: " ++ installPlanPath install
-  pure env{ runInstall = Just install }
+
+  pure env {runInstall = Just install}
 
 runCommand env@Env{ runChains = Nothing } cmd@(BeaconDoRun bChain _ _) = do
   env' <- runCommand env BeaconLoadChains
@@ -179,7 +191,9 @@ runCommand env@Env{ runInstall = Nothing } cmd@(BeaconDoRun _ ver _) = do
 runCommand env@Env{..} (BeaconDoRun bChain ver count) = do
   printStyled StyleInfo "performing run..."
 
-  meta <- mkMeta <$> getCurrentTime
+  manifest <- mkManifest $ fromJust runInstall
+  date <- getCurrentTime
+  let meta = mkMeta date manifest
   shellRunDbAnalyser env beaconChain currentData
   encodeFile currentMeta meta
   shellMergeMetaAndData env currentMeta currentData currentRun
@@ -196,7 +210,7 @@ runCommand env@Env{..} (BeaconDoRun bChain ver count) = do
     currentMeta   = envBeaconDir env </> "beacon-metadata.json"
     currentRun    = envBeaconDir env </> "beacon-result.json"
     beaconChain   = fromJust $ runChains >>= lookupChain bChain
-    mkMeta date = BeaconRunMeta {
+    mkMeta date manifest = BeaconRunMeta {
         commit  = fromJust runCommit
       , version = ver
       , chain   = bChain
@@ -243,7 +257,6 @@ runCommand env (BeaconVariance slug) = do
     runDir = envBeaconDir env </> "run"
 
 
-
 nextUnusedFilename :: FilePath -> IO FilePath
 nextUnusedFilename inSlugDir = do
   fileNamesDesc <- sortBy (comparing Down) <$> listDirectory inSlugDir
@@ -260,6 +273,45 @@ nextUnusedFilename inSlugDir = do
     parseFileName fn
       | length fn /= 12 || takeExtension fn /= ".json" = Nothing
       | otherwise = readMaybe $ take 3 $ drop 4 fn
+
+
+mkManifest :: InstallInfo -> IO Manifest
+mkManifest install = do
+  units <- pjUnits <$> decodePlanJson (installPlanPath install)
+
+  let mPkgVers =
+        for manifestPackages $ \pn ->
+          maybe
+            (Failure [pn])
+            (Success . uPId)
+            (findPackage units pn)
+
+  case mPkgVers of
+    Failure missingPkgs ->
+      printFatalAndDie $
+        unlines
+          [ "The following packages are missing from db-analyser's build plan!\n",
+            intercalate "," (map show missingPkgs)
+          ]
+    Success pkgVers ->
+      return $ Manifest $ Map.fromList [(pn, pv) | PkgId pn pv <- pkgVers]
+  where
+    findPackage units pn =
+      listToMaybe
+        [ unit | unit <- Map.elems units, PkgId pn' _pver <- [uPId unit], pn' == pn
+        ]
+
+    manifestPackages =
+      map
+        PkgName
+        [ "ouroboros-consensus",
+          "ouroboros-network",
+          "cardano-ledger-core",
+          "plutus-core",
+          "cardano-crypto",
+          "cardano-prelude"
+        ]
+
 
 appHeader :: String
 appHeader = unlines

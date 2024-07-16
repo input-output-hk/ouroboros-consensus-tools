@@ -52,6 +52,7 @@ executable beacon
     , ansi-terminal
     , base
     , bytestring
+    , cabal-plan
     , cardano-slotting
     , Chart                 >=1.9
     , Chart-cairo           >=1.9
@@ -69,5 +70,6 @@ executable beacon
     -- , ouroboros-consensus-cardano:unstable-cardano-tools  >= 0.12.1
     , vector
     , vector-algorithms
+    , validation-selective
 
     , text-builder
