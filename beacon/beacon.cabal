@@ -22,30 +22,29 @@ extra-doc-files:
 executable beacon
   hs-source-dirs:   app
   main-is:          beacon.hs
-
-  other-modules:    Cardano.Beacon.CDF
-                    Cardano.Beacon.Chain
-                    Cardano.Beacon.CLI
-                    Cardano.Beacon.Compare
-                    Cardano.Beacon.Console
-                    Cardano.Beacon.Run
-                    Cardano.Beacon.SlotDataPoint
-                    Cardano.Beacon.Types
-
-                    Paths_beacon
+  other-modules:
+    Cardano.Beacon.CDF
+    Cardano.Beacon.Chain
+    Cardano.Beacon.CLI
+    Cardano.Beacon.Compare
+    Cardano.Beacon.Console
+    Cardano.Beacon.Run
+    Cardano.Beacon.SlotDataPoint
+    Cardano.Beacon.Types
+    Paths_beacon
 
   autogen-modules:  Paths_beacon
-
   default-language: Haskell2010
   ghc-options:
     -Wall -Wcompat -Wincomplete-uni-patterns
-    -Wincomplete-record-updates -Widentities
-    -Wredundant-constraints -Wmissing-export-lists -Wunused-packages
+    -Wincomplete-record-updates -Widentities -Wredundant-constraints
+    -Wmissing-export-lists -Wunused-packages
     -Wno-unticked-promoted-constructors
 
   -- development only
   ghc-options:
-    -Wno-unused-top-binds -fno-warn-unused-imports -fno-warn-unused-local-binds -fno-warn-unused-packages
+    -Wno-unused-top-binds -fno-warn-unused-imports
+    -fno-warn-unused-local-binds -fno-warn-unused-packages
 
   build-depends:
     , aeson                 >=2.1.2
@@ -66,10 +65,10 @@ executable beacon
     , process
     , statistics
     , text
+    , text-builder
     , time
-    -- , ouroboros-consensus-cardano:unstable-cardano-tools  >= 0.12.1
+    , validation-selective
     , vector
     , vector-algorithms
-    , validation-selective
 
-    , text-builder
+-- , ouroboros-consensus-cardano:unstable-cardano-tools  >= 0.12.1
