@@ -7,6 +7,8 @@ module Cardano.Beacon.SlotDataPoint (
     SlotDataPoint (..)
   , SortedDataPoints (unPoints)
   , mkSortedDataPoints
+  , applySortedDataPoints
+  , sdpTxCount
   ) where
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
@@ -17,8 +19,10 @@ import           Data.Int
 import           Data.List (sortOn)
 import qualified Data.Vector as V (toList)
 import           Data.Word
-import           Text.Builder (Builder)
+import           Data.Text (Text)
+import           Data.Text.Read (decimal)
 -- import           Cardano.Tools.DBAnalyser.Analysis.BenchmarkLedgerOps.SlotDataPoint as SDP
+
 
 
 -- | type for a lightweight guarantee to have a list of data points
@@ -32,6 +36,9 @@ instance FromJSON SortedDataPoints where
 
 mkSortedDataPoints :: [SlotDataPoint] -> SortedDataPoints
 mkSortedDataPoints = SDP . sortOn slot
+
+applySortedDataPoints :: ([SlotDataPoint] -> [SlotDataPoint]) -> SortedDataPoints -> SortedDataPoints
+applySortedDataPoints f (SDP xs) = (SDP (f xs))
 
 
 instance FromJSON SlotDataPoint where
@@ -49,7 +56,7 @@ instance FromJSON SlotDataPoint where
     mut_headerApply :: Int64    <- o .: "mut_headerApply"
     mut_blockTick   :: Int64    <- o .: "mut_blockTick"
     mut_blockApply  :: Int64    <- o .: "mut_blockApply"
-    let blockStats = BlockStats []
+    blockStats      :: [Text]   <- o .: "blockStats"
 
     pure SlotDataPoint{..}
 
@@ -96,8 +103,16 @@ data SlotDataPoint =
       , mut_blockTick   :: !Int64
       , mut_blockApply  :: !Int64
       -- | Free-form information about the block.
-      , blockStats      :: !BlockStats
+      , blockStats      :: ![Text]
       } deriving Show
 
+sdpTxCount :: SlotDataPoint -> Int
+sdpTxCount SlotDataPoint{blockStats} = case blockStats of 
+  c_ : _
+    | Right (c, "") <- decimal c_ -> c
+  _                               -> 0
+
+{-
 newtype BlockStats = BlockStats { unBlockStats :: [Builder] }
   deriving Show
+-}

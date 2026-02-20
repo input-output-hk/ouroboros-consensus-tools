@@ -8,12 +8,15 @@ module Cardano.Beacon.Compare (
   , doVariance
   ) where
 
+import           Cardano.Beacon.Chain
 import           Cardano.Beacon.Console
+import           Cardano.Beacon.RunMeta
 import           Cardano.Beacon.SlotDataPoint
 import           Cardano.Beacon.Types
 import           Cardano.Slotting.Slot (SlotNo (..))
 import           Control.Arrow ((>>>))
 import           Control.Monad (forM_, unless, when)
+import           Data.Maybe (isNothing)
 import           Data.Ord (Down (Down), comparing)
 import           Data.Set (Set)
 import qualified Data.Set as Set
@@ -23,13 +26,37 @@ import           Data.Vector.Algorithms.Merge (sortBy)
 import qualified Graphics.Rendering.Chart.Backend.Cairo as Chart.Cairo
 import           Graphics.Rendering.Chart.Easy ((.=))
 import qualified Graphics.Rendering.Chart.Easy as Chart
+import           Numeric
 import           Prelude hiding (putStr, putStrLn)
+import qualified Statistics.Function as Stat
+import qualified Statistics.Sample as Stat
 
 
-doCompare :: BeaconRun -> BeaconRun -> IO ()
-doCompare runA runB = do
-  compareMeasurements True runA runB selMutForecast
-  compareMeasurements True runA runB selMutBlockApply
+doCompare :: Chains -> BeaconRun -> Maybe BeaconRun -> IO ()
+doCompare chains runA_@BeaconRun{rMeta = metaA} mRunB
+  | isNothing ch =
+      printStyled StyleFatal $ "chain fragment not found: " ++ show (chain metaA)
+  | otherwise = case mRunB of
+      Nothing -> summarizeBeaconRun runA selMutBlockApply
+      Just runB_
+        | chain metaA /= chain (rMeta runB_) ->
+            printStyled StyleFatal "meaningful comparisons between runs on different chain fragments is currently not supported"
+        | otherwise -> do
+          let runB = postProc runB_
+          compareMeasurements True runA runB selMutForecast
+          compareMeasurements True runA runB selMutBlockApply
+          compareMeasurements True runA runB selMutTotalTime
+
+          summarizeBeaconRun runA selMutBlockApply
+          summarizeBeaconRun runB selMutBlockApply
+  where
+    ch         = lookupChain (chain metaA) chains
+    dropUntil  = maybe id (\from -> dropWhile (\SlotDataPoint{slot} -> slot < fromIntegral from)) (ch >>= chFromSlot)
+    takeBlocks = maybe id take (ch >>= chProcessBlocks)
+    runA       = postProc runA_
+
+    postProc run@BeaconRun{rData} =
+      run {rData = applySortedDataPoints (takeBlocks . dropUntil) rData}
 
 doVariance :: [BeaconRun] -> IO ()
 doVariance [] =
@@ -60,14 +87,15 @@ doVariance runs = do
 data Selector = Selector {
     selName       :: String
   , selProjection :: SlotDataPoint -> Double
+  , selUnit       :: String
   }
 
 selSlot, selMutForecast, selMutBlockApply, selMutTotalTime, selAllocatedBytes :: Selector
-selSlot             = Selector "slot"           (fromIntegral . unSlotNo . slot)
-selMutForecast      = Selector "mut_forecast"   (fromIntegral . mut_forecast)
-selMutBlockApply    = Selector "mut_blockApply" (fromIntegral . mut_blockApply)
-selMutTotalTime     = Selector "totalTime"      (fromIntegral . totalTime)
-selAllocatedBytes   = Selector "allocatedBytes" (fromIntegral . allocatedBytes)
+selSlot             = Selector "slot"           (fromIntegral . unSlotNo . slot)  ""
+selMutForecast      = Selector "mut_forecast"   (fromIntegral . mut_forecast)     "μs"
+selMutBlockApply    = Selector "mut_blockApply" (fromIntegral . mut_blockApply)   "μs"
+selMutTotalTime     = Selector "totalTime"      (fromIntegral . totalTime)        "μs"
+selAllocatedBytes   = Selector "allocatedBytes" (fromIntegral . allocatedBytes)   "B"
 
 -- | Get metric specified by the selector for all slots.
 (.>) ::
@@ -78,6 +106,27 @@ BeaconRun{ rData } .> Selector{ selProjection } =
   V.map selProjection $ V.fromList $ unPoints rData
 
 infixl 9 .>
+
+
+summarizeBeaconRun :: BeaconRun -> Selector -> IO ()
+summarizeBeaconRun run sel@(Selector header _ unit) = do
+  printStyled StyleInfo $ "Summary for " ++ header ++ "/" ++ toSlug (rMeta run)
+  putStrLn $ "sample size: " ++ show (V.length sample) ++ " blocks"
+  putStrLn $ "   tx/block: " ++ show maxTxCount
+  putStrLn $ "       mean: " ++ withUnit mean ++ "   (" ++ withUnit sMin ++ " .. " ++ withUnit sMax ++ ")"
+  putStrLn $ " avg per tx: " ++ withUnit avgPerTx
+  where
+    withUnit :: Double -> String
+    withUnit d = (showFFloat (Just 2) d "") ++ unit
+
+    maxTxCount    = maximum $ map sdpTxCount $ unPoints $ rData run
+    runMaxTxOnly  = run {rData = applySortedDataPoints (filter ((== maxTxCount) . sdpTxCount)) (rData run)}
+
+    sample        = runMaxTxOnly .> sel
+    mean          = Stat.mean sample
+    (sMin, sMax)  = Stat.minMax sample
+    avgPerTx      = mean / fromIntegral maxTxCount
+
 
 -- | Compare two measurements (benchmarks).
 --
@@ -108,7 +157,7 @@ infixl 9 .>
 --
 -- TODO: Describe what we do with the comparison results.
 compareMeasurements :: Bool -> BeaconRun -> BeaconRun -> Selector -> IO ()
-compareMeasurements emitPlots runA runB selector@(Selector header _) = do
+compareMeasurements emitPlots runA runB selector@(Selector header _ _) = do
     unless (runA .> selSlot == runB .> selSlot) $
       printFatalAndDie "Slot columns must be the same!"
 
@@ -145,7 +194,8 @@ compareMeasurements emitPlots runA runB selector@(Selector header _) = do
         (Just outliers)
         runA
         runB
-        $ header
+        $ "compare_"
+          <> header
           <> "-"
           <> take 9 versionA
           <> "_vs_"

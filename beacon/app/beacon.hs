@@ -60,9 +60,11 @@ import           Cardano.Beacon.CLI
 import           Cardano.Beacon.Compare
 import           Cardano.Beacon.Console
 import           Cardano.Beacon.Run
+import           Cardano.Beacon.RunMeta
 import           Cardano.Beacon.Types
 import           Control.Concurrent (threadDelay)
-import           Control.Exception (bracket_)
+import           Control.Exception (SomeException, bracket_, displayException,
+                     try)
 import           Control.Monad (foldM_, forM_, unless, when)
 import           Control.Monad.Extra (ifM, unlessM)
 import           Data.Aeson (eitherDecodeFileStrict, eitherDecodeStrict',
@@ -74,7 +76,7 @@ import           Data.List (find, intercalate, intersperse, sort, sortBy)
 import qualified Data.List.NonEmpty as NE
 import           Data.Map (Map)
 import qualified Data.Map as Map
-import           Data.Maybe (fromJust, listToMaybe)
+import           Data.Maybe (fromJust, fromMaybe, listToMaybe)
 import           Data.Monoid
 import           Data.Ord (Down (..), comparing)
 import qualified Data.Text as T
@@ -180,21 +182,21 @@ runCommand env (BeaconBuild ver) = do
 
   pure env {runInstall = Just install}
 
-runCommand env@Env{ runChains = Nothing } cmd@(BeaconDoRun bChain _ _) = do
+runCommand env@Env{ runChains = Nothing } cmd@(BeaconDoRun bChain _ _ _ _) = do
   env' <- runCommand env BeaconLoadChains
   case runChains env' >>= lookupChain bChain of
     Nothing -> printFatalAndDie $ "requested chain " ++ show bChain ++ " is not registered"
     Just{}  -> runCommand env' cmd
-runCommand env@Env{ runInstall = Nothing } cmd@(BeaconDoRun _ ver _) = do
+runCommand env@Env{ runInstall = Nothing } cmd@(BeaconDoRun _ ver _ _ _) = do
   env' <- runCommand env (BeaconBuild ver)
   runCommand env' cmd
-runCommand env@Env{..} (BeaconDoRun bChain ver count) = do
+runCommand env@Env{..} (BeaconDoRun bChain ver count apply mBackend) = do
   printStyled StyleInfo "performing run..."
 
   manifest <- mkManifest $ fromJust runInstall
   date <- getCurrentTime
   let meta = mkMeta date manifest
-  shellRunDbAnalyser env beaconChain currentData
+  shellRunDbAnalyser env apply backend beaconChain currentData
   encodeFile currentMeta meta
   shellMergeMetaAndData env currentMeta currentData currentRun
 
@@ -203,13 +205,14 @@ runCommand env@Env{..} (BeaconDoRun bChain ver count) = do
   _ <- runCommand env (BeaconStoreRun currentRun)
 
   if count > 1
-    then runCommand env (BeaconDoRun bChain ver (count - 1))
+    then runCommand env (BeaconDoRun bChain ver (count - 1) apply mBackend)
     else pure env{ runInstall = Nothing }
   where
     currentData   = envBeaconDir env </> "beacon-slotdata.json"
     currentMeta   = envBeaconDir env </> "beacon-metadata.json"
     currentRun    = envBeaconDir env </> "beacon-result.json"
     beaconChain   = fromJust $ runChains >>= lookupChain bChain
+    backend       = fromMaybe V2InMem mBackend
     mkMeta date manifest = BeaconRunMeta {
         commit  = fromJust runCommit
       , version = ver
@@ -236,13 +239,20 @@ runCommand env (BeaconStoreRun file) = do
   where
     runDir = envBeaconDir env </> "run"
 
-runCommand env (BeaconCompare slugA slugB) = do
+runCommand env@Env{ runChains = Nothing } cmd@BeaconCompare{} = do
+  env' <- runCommand env BeaconLoadChains
+  runCommand env' cmd
+runCommand env@Env{ runChains = Just chains } (BeaconCompare slugA mSlugB) = do
   readA <- eitherDecodeFileStrict $ runDir </> slugA </> "run-001.json"
-  readB <- eitherDecodeFileStrict $ runDir </> slugB </> "run-001.json"
+  readB <- maybe
+    (pure $ Left "summary only requested")
+    (\slugB -> eitherDecodeFileStrict $ runDir </> slugB </> "run-001.json")
+    mSlugB
 
-  case (readA, readB) of
-    (Right runA, Right runB) -> doCompare runA runB
-    _ -> printFatalAndDie "could not read / parse specified slugs"
+  case (mSlugB, readA, readB) of
+    (Just{},  Right runA, Right runB) -> doCompare chains runA runB
+    (Nothing, Right runA, _)          -> doCompare chains runA Nothing
+    _                                 -> printFatalAndDie "could not read / parse specified slugs"
 
   pure env
   where
@@ -255,6 +265,9 @@ runCommand env (BeaconVariance slug) = do
   pure env
   where
     runDir = envBeaconDir env </> "run"
+
+runCommand env (BeaconSummary slug) =
+  runCommand env (BeaconCompare slug Nothing)
 
 
 nextUnusedFilename :: FilePath -> IO FilePath
@@ -276,26 +289,29 @@ nextUnusedFilename inSlugDir = do
 
 
 mkManifest :: InstallInfo -> IO Manifest
-mkManifest install = do
-  units <- pjUnits <$> decodePlanJson (installPlanPath install)
-
-  let mPkgVers =
-        for manifestPackages $ \pn ->
-          maybe
-            (Failure [pn])
-            (Success . uPId)
-            (findPackage units pn)
-
-  case mPkgVers of
-    Failure missingPkgs ->
-      printFatalAndDie $
-        unlines
-          [ "The following packages are missing from db-analyser's build plan!\n",
-            intercalate "," (map show missingPkgs)
-          ]
-    Success pkgVers ->
-      return $ Manifest $ Map.fromList [(pn, pv) | PkgId pn pv <- pkgVers]
+mkManifest InstallInfo{installPlanPath} =
+  try (decodePlanJson installPlan) >>= \case
+    Left (ex :: SomeException) -> do
+      printStyled StyleWarning $ displayException ex  ++ "; continuing with empty Manifest"
+      pure $ Manifest Map.empty
+    Right (pjUnits -> units) ->
+      let mPkgVers =
+            for manifestPackages $ \pn ->
+              maybe
+                (Failure [pn])
+                (Success . uPId)
+                (findPackage units pn)
+      in case mPkgVers of
+        Failure missingPkgs ->
+          printFatalAndDie $
+            unlines
+              [ "The following packages are missing from db-analyser's build plan!\n",
+                intercalate "," (map show missingPkgs)
+              ]
+        Success pkgVers ->
+          return $ Manifest $ Map.fromList [(pn, pv) | PkgId pn pv <- pkgVers]
   where
+    installPlan = installPlanPath </> "plan.json"
     findPackage units pn =
       listToMaybe
         [ unit | unit <- Map.elems units, PkgId pn' _pver <- [uPId unit], pn' == pn

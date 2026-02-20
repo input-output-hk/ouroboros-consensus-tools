@@ -15,7 +15,8 @@ module Cardano.Beacon.Run (
   ) where
 
 import           Cardano.Beacon.Chain
-import           Cardano.Beacon.CLI (BeaconOptions (..))
+import           Cardano.Beacon.CLI (ApplyMode (..), Backend,
+                     BeaconOptions (..), backendCLIOpts)
 import           Cardano.Beacon.Console
 import           Cardano.Beacon.Types
 import           Control.Exception (SomeException (..), try)
@@ -81,37 +82,42 @@ shellNixBuildVersion env ver@Version{verCompiler = compiler} = do
   if exists
     then printStyled StyleInfo "target binary already built and linked"
     else do
-      createDirectoryIfMissing False binDir
-      void $ runShellEchoing echoing "nix" nixBuildExeArgs
-      void $ runShellEchoing echoing "nix" nixBuildPlanArgs
+      currentSystem <- runShellEchoing echoing "nix" nixGetSystemArgs
+      printStyled StyleInfo $ "host system identified as " ++ currentSystem
 
-  nix_path <- runShellEchoing echoing "readlink" [outLink]
+      let
+        exeDrv  = "hydraJobs." ++ currentSystem ++ ".native."
+                  ++ compiler
+                  ++ ".exesNoAsserts.db-analyser"
+        planDrv = exeDrv ++ ".src.project.plan-nix"
+
+      createDirectoryIfMissing False binDir
+      void $ runShellEchoing echoing "nix" (nixBuildArgs exeDrv linkExe)
+      void $ runShellEchoing echoing "nix" (nixBuildArgs planDrv linkPlan)
+
+  nix_path <- runShellEchoing echoing "readlink" [linkExe]
   return $ InstallInfo {
-    installExePath = exePath,
-    installPlanPath = planLink,
-    installNixPath = head . lines $ nix_path,
-    installVersion = ver
+    installExePath  = exePath,
+    installPlanPath = linkPlan,
+    installNixPath  = head . lines $ nix_path,
+    installVersion  = ver
   }
   where
     echoing  = envEchoing env
     sha      = ciCommitSHA1 . fromJust . runCommit $ env
     binDir   = envBeaconDir env </> "bin"
     tag      = take 9 sha ++ "-" ++ compiler
-    outLink  = binDir </> tag
-    planLink = binDir </> tag <.> "plan-json"
-    exePath  = outLink </> "bin" </> "db-analyser"
+    linkExe  = binDir </> tag
+    linkPlan = binDir </> tag <.> "plan-json"
+    exePath  = linkExe </> "bin" </> "db-analyser"
 
     flakeRef    = "github:IntersectMBO/ouroboros-consensus/" ++ sha
-    drvPath     = "hydraJobs.x86_64-linux.native."
-                  ++ compiler
-                  ++ ".exesNoAsserts.ouroboros-consensus-cardano.db-analyser"
-    planDrvPath = drvPath ++ ".src.project.plan-nix.json"
 
-    nixBuildExeArgs = ["build", flakeRef ++ "#" ++ drvPath, "-o", outLink]
-    nixBuildPlanArgs = ["build", flakeRef ++ "#" ++ planDrvPath, "-o", planLink]
+    nixBuildArgs drvPath outLink = ["build", flakeRef ++ "#" ++ drvPath, "-o", outLink]
+    nixGetSystemArgs             = ["eval", "--impure", "--raw", "--expr", "'builtins.currentSystem'"]
 
-shellRunDbAnalyser :: RunEnvironment -> BeaconChain -> FilePath -> IO ()
-shellRunDbAnalyser env BeaconChain{..} outFile = do
+shellRunDbAnalyser :: RunEnvironment -> ApplyMode -> Backend -> BeaconChain -> FilePath -> IO ()
+shellRunDbAnalyser env applMode backend BeaconChain{..} outFile = do
   onlyImmutableFlag <-
     whenTrue "--only-immutable-db" <$> detectDbAnalyserNeedsOnlyImmutable env
 
@@ -121,11 +127,12 @@ shellRunDbAnalyser env BeaconChain{..} outFile = do
   where
     -- These are the compiled-in options specified in cardano-node.cabal, used for relese builds.
     -- We adhere to those for maximum fidelity of beacon benchmarks.
-    rtsOpts = "-T -I0 -A16m -N2 --disable-delayed-os-memory-return"
+    rtsOpts = "-T -I0 -A16m -N2 -qb1 -qg1 --disable-delayed-os-memory-return"
 
     dbAnalyser  = installExePath . fromJust . runInstall $ env
     tempResult  = envBeaconDir env </> "temp.result.json"
     echoing     = envEchoing env
+
     chDir
       | isRelative chHomeDir  = envBeaconDir env </> "chain" </> chHomeDir
       | otherwise             = chHomeDir
@@ -134,9 +141,10 @@ shellRunDbAnalyser env BeaconChain{..} outFile = do
       [ "--db", chDir </> chDbDir
       , maybe "" (\s -> "--analyse-from " ++ show s) chFromSlot
       , "--benchmark-ledger-ops"
+      , if applMode == Reapply then "--reapply" else ""
       , "--out-file", tempResult
       , maybe "" (\b -> "--num-blocks-to-process " ++ show b) chProcessBlocks
-      , "cardano"
+      , backendCLIOpts backend
       , "--config", chDir </> chConfigFile
       , "+RTS", rtsOpts, "-RTS"
       ]

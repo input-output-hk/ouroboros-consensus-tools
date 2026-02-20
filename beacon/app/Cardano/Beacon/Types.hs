@@ -89,45 +89,5 @@ data InstallInfo = InstallInfo
 deriving via (Map PkgName Ver) instance ToJSON Manifest
 deriving via (Map PkgName Ver) instance FromJSON Manifest
 
-data BeaconRunMeta = BeaconRunMeta {
-    commit   :: CommitInfo
-  , version  :: Version
-  , chain    :: ChainName
-  , nixPath  :: FilePath
-  , host     :: String
-  , date     :: UTCTime
-  , manifest :: Manifest
-  }
-  deriving (Show, Generic)
-
-instance ToJSON BeaconRunMeta where
-  toJSON = genericToJSON aesonNoTagFields
-
-instance FromJSON BeaconRunMeta where
-  parseJSON = genericParseJSON aesonNoTagFields
-
-data BeaconRun = BeaconRun {
-    rMeta :: BeaconRunMeta
-  , rData :: SortedDataPoints
-  }
-  deriving Show
-
-instance FromJSON BeaconRun where
-  parseJSON = withObject "BeaconRun" $ \o ->
-    BeaconRun
-      <$> o .: "meta"
-      <*> o .: "data"
-
-toSlug :: BeaconRunMeta -> String
-toSlug BeaconRunMeta{..} =
-  intercalate "-"
-    [ commitShort commit
-    , verCompiler version
-    , chainShort  chain
-    ]
-  where
-    commitShort = take 9 . ciCommitSHA1
-    chainShort (ChainName name) = take 16 $ T.unpack name
-
 aesonNoTagFields :: Options
 aesonNoTagFields = defaultOptions { sumEncoding = ObjectWithSingleField }
