@@ -28,22 +28,21 @@
     };
   };
 
-  outputs = inputs:
-    let
-      inherit ((import ./flake/lib.nix { inherit inputs; }).flake.lib) recursiveImports;
-    in
-    inputs.flake-parts.lib.mkFlake { inherit inputs; } {
-      imports = recursiveImports [ ./perSystem ];
+  outputs = inputs: let
+    inherit ((import ./flake/lib.nix {inherit inputs;}).flake.lib) recursiveImports;
+  in
+    inputs.flake-parts.lib.mkFlake {inherit inputs;} {
+      imports = recursiveImports [./perSystem];
       systems = [
         "x86_64-linux"
         "aarch64-linux"
         "aarch64-darwin"
       ];
-      perSystem = { system, ... }: {
+      perSystem = {system, ...}: {
         _module.args.pkgs = import inputs.nixpkgs {
           inherit system;
           inherit (inputs.haskellNix) config;
-          overlays = [ inputs.haskellNix.overlay ];
+          overlays = [inputs.haskellNix.overlay];
         };
       };
     };

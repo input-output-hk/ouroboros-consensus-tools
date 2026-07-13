@@ -1,6 +1,6 @@
 cabal-version:   3.0
 name:            beacon
-version:         0.1.0.0
+version:         0.2.0.0
 synopsis:        Benchmarking, exploration, and analysis of Consensus.
 description:
   Tool that can be used to compare the performance of two consensus versions, through `ouroboros-consensus:db-analyser`.
@@ -20,8 +20,8 @@ extra-doc-files:
   README.md
 
 executable beacon
-  hs-source-dirs:   app
-  main-is:          beacon.hs
+  hs-source-dirs:     app
+  main-is:            beacon.hs
   other-modules:
     Cardano.Beacon.CDF
     Cardano.Beacon.Chain
@@ -34,24 +34,21 @@ executable beacon
     Cardano.Beacon.Types
     Paths_beacon
 
-  autogen-modules:  Paths_beacon
-  default-language: Haskell2010
-  default-extensions: LambdaCase
-                      NamedFieldPuns
-                      ViewPatterns
+  autogen-modules:    Paths_beacon
+  default-language:   Haskell2010
+  default-extensions:
+    LambdaCase
+    NamedFieldPuns
+    ViewPatterns
+
   ghc-options:
     -Wall -Wcompat -Wincomplete-uni-patterns
     -Wincomplete-record-updates -Widentities -Wredundant-constraints
     -Wmissing-export-lists -Wunused-packages
     -Wno-unticked-promoted-constructors
 
-  if impl(ghc >= 9.8)
-    ghc-options:        -Wno-x-partial    
-
-  -- development only
-  ghc-options:
-    -Wno-unused-top-binds -fno-warn-unused-imports
-    -fno-warn-unused-local-binds -fno-warn-unused-packages
+  if impl(ghc >=9.8)
+    ghc-options: -Wno-x-partial
 
   build-depends:
     , aeson                 >=2.1.2
@@ -72,7 +69,6 @@ executable beacon
     , process
     , statistics
     , text
-    , text-builder
     , time
     , validation-selective
     , vector

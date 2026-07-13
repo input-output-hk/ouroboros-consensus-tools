@@ -12,8 +12,7 @@ module Cardano.Beacon.CLI (
 
 import           Cardano.Beacon.Types
 import           Data.Aeson
-import           Data.Foldable (asum)
-import           Data.Text as Text (Text, pack)
+import           Data.Text as Text (pack)
 import           GHC.Generics (Generic)
 import           Options.Applicative
 

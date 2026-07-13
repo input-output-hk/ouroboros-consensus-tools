@@ -23,7 +23,7 @@ import           Control.Exception (SomeException (..), try)
 import           Control.Monad (void, when)
 import           Data.Bool (bool)
 import           Data.ByteString.Char8 as BSC (ByteString, pack, readFile,
-                     unpack, writeFile)
+                     writeFile)
 import           Data.Maybe (fromJust)
 import           System.Directory (createDirectoryIfMissing, doesFileExist,
                      removeFile)

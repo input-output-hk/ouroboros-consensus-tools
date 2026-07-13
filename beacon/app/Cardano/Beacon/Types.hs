@@ -11,13 +11,10 @@ module Cardano.Beacon.Types (
 
 
 import           Cabal.Plan (PkgName, Ver)
-import           Cardano.Beacon.SlotDataPoint (SortedDataPoints)
 import           Control.Applicative ((<|>))
 import           Data.Aeson
-import           Data.List (intercalate)
 import           Data.Map (Map)
 import           Data.Text as Text (Text)
-import qualified Data.Text as T (unpack)
 import           Data.Time.Clock (UTCTime)
 import           GHC.Generics (Generic)
 

@@ -275,14 +275,15 @@ plotMeasurements ::
      ChartTitle
   -> Selector
   -> Maybe (Set Double)
-     -- ^ Slots to include in plot ('Nothing' means include all slots).
+     -- ^ Slots to exclude from the plot, e.g. outliers or a leading range
+     -- ('Nothing' means exclude none, i.e. plot all slots).
   -> BeaconRun
   -> BeaconRun
   -> FilePath
   -> IO ()
-plotMeasurements (ChartTitle title) selector mSlots runA runB outfile = do
+plotMeasurements (ChartTitle title) selector mExcludedSlots runA runB outfile = do
     let slotXvalue run = V.toList
-                       $ V.filter (onlySlotsIn mSlots . fst)
+                       $ V.filter (notExcluded mExcludedSlots . fst)
                        $ V.zip (run .> selSlot) (run .> selector)
         slotXvalueA = slotXvalue runA
         slotXvalueB = slotXvalue runB
@@ -292,18 +293,19 @@ plotMeasurements (ChartTitle title) selector mSlots runA runB outfile = do
       Chart.plot (Chart.points (toSlug $ rMeta runA) slotXvalueA)
       Chart.plot (Chart.points (toSlug $ rMeta runB) slotXvalueB)
   where
-    onlySlotsIn Nothing      _ = True
-    onlySlotsIn (Just slots) s = s `Set.notMember` slots
+    notExcluded Nothing      _ = True
+    notExcluded (Just slots) s = s `Set.notMember` slots
 
 plotMeasurements' ::
      [BeaconRun]
   -> ChartTitle
   -> Selector
   -> Maybe (Set Double)
-     -- ^ Slots to include in plot ('Nothing' means include all slots).
+     -- ^ Slots to exclude from the plot, e.g. outliers or a leading range
+     -- ('Nothing' means exclude none, i.e. plot all slots).
   -> FilePath
   -> IO ()
-plotMeasurements' runs (ChartTitle title) selector mSlots outfile =
+plotMeasurements' runs (ChartTitle title) selector mExcludedSlots outfile =
   Chart.Cairo.toFile Chart.def outfile $ do
     Chart.layout_title .= title
     Chart.setColors
@@ -322,11 +324,11 @@ plotMeasurements' runs (ChartTitle title) selector mSlots outfile =
   where
     valuesBySlot run =
         V.toList
-      $ V.filter (onlySlotsIn mSlots . fst)
+      $ V.filter (notExcluded mExcludedSlots . fst)
       $ V.zip (run .> selSlot) (run .> selector)
 
-    onlySlotsIn Nothing      _ = True
-    onlySlotsIn (Just slots) s = s `Set.notMember` slots
+    notExcluded Nothing      _ = True
+    notExcluded (Just slots) s = s `Set.notMember` slots
 
 --------------------------------------------------------------------------------
 -- Printing functions

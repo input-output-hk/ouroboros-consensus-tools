@@ -1,13 +1,18 @@
-{ config, lib, withSystem, ... }: {
+{
+  config,
+  lib,
+  withSystem,
+  ...
+}: {
   flake.hydraJobs = lib.genAttrs config.systems (lib.flip withSystem (
     {
       config,
       pkgs,
       ...
     }: let
-      required    = {inherit (config) packages checks;};
+      required = {inherit (config) packages checks;};
       nonRequired = {inherit (config) devShells;};
-      jobs        = required // nonRequired;
+      jobs = required // nonRequired;
     in
       jobs
       // {

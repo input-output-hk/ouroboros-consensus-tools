@@ -2,12 +2,8 @@
 
 module Cardano.Beacon.CDF (module Cardano.Beacon.CDF) where
 
-import           Control.Monad (forM_)
-import           Data.Function ((&))
-import           Data.IntervalMap.FingerTree as Intv (Interval (..), bounds,
-                     singleton, union)
-import           Data.List (sort)
-import           Data.Maybe (fromJust)
+import           Data.IntervalMap.FingerTree (Interval (..))
+import           Data.List (transpose)
 import           Data.Ratio
 import qualified Data.Vector.Unboxed as VU
 import           GHC.Real (Ratio ((:%)))
@@ -90,46 +86,42 @@ combineSamples :: [Sample] -> CDF
 combineSamples =
   cdf Stat.medianUnbiased briefQuantiles . VU.concat
 
--- WIP!
+-- | Combines the summary statistics of several 'CDF's (e.g. one per stored
+-- run of a slug) into one. 'cdfSize', 'cdfMinMax' and 'cdfRange' are exact.
+-- The rest are only approximated, since the true combined distribution
+-- can't be recovered from summary statistics alone without the underlying
+-- samples (see 'combineSamples' for that): 'cdfAverage', 'cdfMedian',
+-- 'cdfSamples' and 'cdfSamples2' use a size-weighted average across the
+-- inputs, 'cdfStddev' takes their maximum. Assumes every input was built
+-- from the same quantile list (true for all current callers, which all go
+-- through 'briefQuantiles').
 combineCDFs :: [CDF] -> CDF
 combineCDFs cdfs =
   CDF
-  { cdfSize     = sum $ cdfSize <$> cdfs
-  , cdfAverage  = 0
+  { cdfSize     = totalSize
+  , cdfAverage  = weightedAvg cdfAverage
   , cdfStddev   = maximum $ cdfStddev <$> cdfs    -- approximating
-  , cdfMedian   = 0
+  , cdfMedian   = weightedAvg cdfMedian           -- approximating
   , cdfMinMax   = Interval imin imax
   , cdfRange    = imax - imin
-  , cdfSamples  = []
-  , cdfSamples2 = []
+  , cdfSamples  = weightedAvgQuantiles cdfSamples
+  , cdfSamples2 = weightedAvgQuantiles cdfSamples2
   }
   where
-    imin = 0
-    imax = 0
+    totalSize = sum $ cdfSize <$> cdfs
 
+    weightedAvg f =
+      Stat.meanWeighted $ VU.fromList [ (f c, fromIntegral (cdfSize c)) | c <- cdfs ]
 
----
---- testing / development
----
+    imin = minimum [lo | CDF{cdfMinMax = Interval lo _} <- cdfs]
+    imax = maximum [hi | CDF{cdfMinMax = Interval _ hi} <- cdfs]
 
-contParams :: [Stat.ContParam]
-contParams =
-  [ Stat.cadpw
-  , Stat.hazen
-  , Stat.spss
-  , Stat.s
-  , Stat.medianUnbiased
-  , Stat.normalUnbiased
-  ]
+    -- approximating: a size-weighted average per matching quantile,
+    -- assuming every 'CDF' carries the same quantiles in the same order
+    weightedAvgQuantiles f =
+      [ (q, weightedAvgOf (snd <$> column))
+      | column@((q, _) : _) <- transpose (f <$> cdfs)
+      ]
 
-testList :: [Double]
-testList = [1, 2, 3, 4, 1, 5, 1, 5, 9, 10, 6, 1, 4, 7, 0, 0, 6]
-
-test :: [Double] -> IO ()
-test ns = do
-  putStrLn $ "median element: " ++ show (vec `elemClosestTo` Q (1 % 2))
-  forM_ contParams $ \contParam -> do
-    putStrLn $ " --> for ContParam: " ++ show contParam ++ ": "
-    print $ cdf contParam briefQuantiles vec
-  where
-    vec = Stat.sort $ VU.fromList ns
+    weightedAvgOf vals =
+      Stat.meanWeighted $ VU.fromList $ zip vals (fromIntegral . cdfSize <$> cdfs)

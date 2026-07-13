@@ -6,8 +6,8 @@
 module Cardano.Beacon.SlotDataPoint (
     SlotDataPoint (..)
   , SortedDataPoints (unPoints)
-  , mkSortedDataPoints
   , applySortedDataPoints
+  , mkSortedDataPoints
   , sdpTxCount
   ) where
 
@@ -17,10 +17,9 @@ import           Cardano.Slotting.Slot (SlotNo)
 import           Data.Aeson
 import           Data.Int
 import           Data.List (sortOn)
-import qualified Data.Vector as V (toList)
-import           Data.Word
 import           Data.Text (Text)
 import           Data.Text.Read (decimal)
+import           Data.Word
 -- import           Cardano.Tools.DBAnalyser.Analysis.BenchmarkLedgerOps.SlotDataPoint as SDP
 
 
@@ -107,7 +106,7 @@ data SlotDataPoint =
       } deriving Show
 
 sdpTxCount :: SlotDataPoint -> Int
-sdpTxCount SlotDataPoint{blockStats} = case blockStats of 
+sdpTxCount SlotDataPoint{blockStats} = case blockStats of
   c_ : _
     | Right (c, "") <- decimal c_ -> c
   _                               -> 0

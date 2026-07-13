@@ -52,9 +52,8 @@
 -- - [ ] Perform a statistical analysis on the measurements.
 module Main (main) where
 
-import           Cabal.Plan (CompInfo (..), CompName (..), PkgId (..),
-                     PkgName (..), PlanJson (..), Unit (..), Ver,
-                     decodePlanJson, dispCompName, dispCompNameTarget)
+import           Cabal.Plan (PkgId (..), PkgName (..), PlanJson (..), Unit (..),
+                     decodePlanJson)
 import           Cardano.Beacon.Chain
 import           Cardano.Beacon.CLI
 import           Cardano.Beacon.Compare
@@ -65,21 +64,16 @@ import           Cardano.Beacon.Types
 import           Control.Concurrent (threadDelay)
 import           Control.Exception (SomeException, bracket_, displayException,
                      try)
-import           Control.Monad (foldM_, forM_, unless, when)
-import           Control.Monad.Extra (ifM, unlessM)
+import           Control.Monad (foldM_, forM_, when)
+import           Control.Monad.Extra (ifM)
 import           Data.Aeson (eitherDecodeFileStrict, eitherDecodeStrict',
                      encodeFile)
 import           Data.Either (rights)
-import           Data.Foldable (Foldable (..))
-import           Data.Function (on, (&))
-import           Data.List (find, intercalate, intersperse, sort, sortBy)
-import qualified Data.List.NonEmpty as NE
-import           Data.Map (Map)
+import           Data.List (intercalate, sort, sortBy)
 import qualified Data.Map as Map
 import           Data.Maybe (fromJust, fromMaybe, listToMaybe)
 import           Data.Monoid
 import           Data.Ord (Down (..), comparing)
-import qualified Data.Text as T
 import           Data.Time.Clock (getCurrentTime)
 import           Data.Traversable (for)
 import           Data.Version (showVersion)
@@ -242,6 +236,16 @@ runCommand env (BeaconStoreRun file) = do
 runCommand env@Env{ runChains = Nothing } cmd@BeaconCompare{} = do
   env' <- runCommand env BeaconLoadChains
   runCommand env' cmd
+-- | Compares only the first stored sample (@run-001.json@) of each slug,
+-- not every run recorded under it. This is a known, deliberate limitation:
+-- runs sharing a slug are guaranteed identical only along the fields
+-- 'Cardano.Beacon.RunMeta.toSlug' derives it from (commit/compiler/chain
+-- /apply mode/backend) -- notably *not* 'host', since the same
+-- configuration may legitimately be benchmarked on different hardware.
+-- A single sample therefore isn't guaranteed representative of the whole
+-- slug. The intended fix is to compare the combined distribution of all
+-- samples in a slug rather than one arbitrary run, using
+-- 'Cardano.Beacon.CDF.combineCDFs' (implemented, but not yet wired up here).
 runCommand env@Env{ runChains = Just chains } (BeaconCompare slugA mSlugB) = do
   readA <- eitherDecodeFileStrict $ runDir </> slugA </> "run-001.json"
   readB <- maybe
@@ -266,6 +270,9 @@ runCommand env (BeaconVariance slug) = do
   where
     runDir = envBeaconDir env </> "run"
 
+-- | A single sample is sufficient here: unlike 'BeaconCompare' against a
+-- second slug, a summary only reports on one slug, and all fields the slug
+-- is derived from are guaranteed identical across its stored runs.
 runCommand env (BeaconSummary slug) =
   runCommand env (BeaconCompare slug Nothing)
 
@@ -273,12 +280,22 @@ runCommand env (BeaconSummary slug) =
 nextUnusedFilename :: FilePath -> IO FilePath
 nextUnusedFilename inSlugDir = do
   fileNamesDesc <- sortBy (comparing Down) <$> listDirectory inSlugDir
-  pure
-    $ indexedName
-    $ maybe 1 (+ 1)
-    $ getAlt
-    $ mconcat
-    $ map (Alt . parseFileName) fileNamesDesc
+  let target =
+        indexedName
+        $ maybe 1 (+ 1)
+        $ getAlt
+        $ mconcat
+        $ map (Alt . parseFileName) fileNamesDesc
+
+  -- The only legitimate way to land on the very first name is an empty slug
+  -- dir. Seeing it with existing runs present means none of them parsed as a
+  -- run-NNN.json index (or one is indexed 000), so we're about to overwrite.
+  when (target == indexedName 1 && not (null fileNamesDesc)) $
+    printStyled StyleWarning $
+      "next run for " ++ inSlugDir ++ " computed as " ++ target
+      ++ " despite existing runs in this slug; this will overwrite a run"
+
+  pure target
   where
     indexedName :: Int -> FilePath
     indexedName = printf "run-%03d.json" . max 1 . min 999
