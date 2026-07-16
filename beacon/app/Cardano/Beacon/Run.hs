@@ -89,7 +89,18 @@ shellNixBuildVersion env ver@Version{verCompiler = compiler} = do
         exeDrv  = "hydraJobs." ++ currentSystem ++ ".native."
                   ++ compiler
                   ++ ".exesNoAsserts.db-analyser"
-        planDrv = exeDrv ++ ".src.project.plan-nix"
+        -- `hydraJobs.<system>.native.<compiler>.build` only exists on Linux:
+        -- consensus's CI skips generating it elsewhere to reduce load (see
+        -- `exesOnly` in ouroboros-consensus's nix/ci.nix). `legacyPackages`
+        -- exposes the same underlying package set on every platform; its
+        -- `hsPkgs.ouroboros-consensus.project.plan-nix` carries the exact same
+        -- (shared, project-wide) build plan without touching any of the
+        -- CI-gated `build` jobs.
+        planDrv = "legacyPackages." ++ currentSystem ++ "." ++ hsPkgsPath compiler
+                  ++ "ouroboros-consensus.project.plan-nix"
+        hsPkgsPath = \case
+          "haskell914" -> "hsPkgs.projectVariants.ghc914.hsPkgs."
+          _            -> "hsPkgs."
 
       createDirectoryIfMissing False binDir
       void $ runShellEchoing echoing "nix" (nixBuildArgs exeDrv linkExe)
