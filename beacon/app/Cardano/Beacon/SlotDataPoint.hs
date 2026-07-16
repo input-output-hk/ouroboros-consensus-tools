@@ -60,7 +60,7 @@ instance FromJSON SlotDataPoint where
     pure SlotDataPoint{..}
 
 
--- TODO remove types once this has been resolved:
+-- Future work: remove duplicate type definition once this has been resolved:
 {-
 app/Cardano/Beacon/SlotDataPoint.hs:18:1: error:
     Could not load module ‘Cardano.Tools.DBAnalyser.Analysis.BenchmarkLedgerOps.SlotDataPoint’
@@ -111,7 +111,3 @@ sdpTxCount SlotDataPoint{blockStats} = case blockStats of
     | Right (c, "") <- decimal c_ -> c
   _                               -> 0
 
-{-
-newtype BlockStats = BlockStats { unBlockStats :: [Builder] }
-  deriving Show
--}

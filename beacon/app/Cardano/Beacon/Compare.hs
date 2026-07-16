@@ -80,9 +80,9 @@ doVariance runs = do
 -- Output data analysis functions
 --------------------------------------------------------------------------------
 
--- TODO: We might consider including this as part of the program
--- option/configuration. Alternatively, the CSV fields can be obtained from
--- `db-analyser` if we use it as a library.
+-- Future options: We might consider making selectors part of the program
+-- CLI options. Alternatively, the fields names could be obtained from
+-- SlotDataPoint for increased robustness.
 
 data Selector = Selector {
     selName       :: String
@@ -155,20 +155,21 @@ summarizeBeaconRun run sel@(Selector header _ unit) = do
 --
 -- > d_s A B = - (d_s B A)
 --
--- TODO: Describe what we do with the comparison results.
+-- Future work:
+-- * Provide a continuation to handle comparison results.
+-- * Make threshold and condition(s) on it configurable.
 compareMeasurements :: Bool -> BeaconRun -> BeaconRun -> Selector -> IO ()
 compareMeasurements emitPlots runA runB selector@(Selector header _ _) = do
     unless (runA .> selSlot == runB .> selSlot) $
       printFatalAndDie "Slot columns must be the same!"
 
-    -- TODO: Make this configurable.
     let threshold = 0.8
 
     let abRelChange = relChangeAscending runA runB
 
     printStyled StyleInfo $ "Comparison for " ++ header
 
-    -- TODO: Bigger is better or smaller is better depends on the metric. We should make this configurable.
+    -- see above: "Bigger is better" or "smaller is better" depends on the metric - make configurable.
     abRelChange `shouldBeBelow` threshold
 
     let n = 10 :: Int
@@ -183,7 +184,6 @@ compareMeasurements emitPlots runA runB selector@(Selector header _ _) = do
     let outliers = Set.fromList
                  $ V.toList
                  $ filterSlots (\v -> v <= -threshold || v >= threshold ) abRelChange
-    -- TODO: We might avoid an 'n * log n' runtime if we augment the CSV file with the relative change.
 
     print outliers
 
@@ -231,19 +231,18 @@ shouldBeBelow dr threshold =
 check :: Bool -> IO ()
 check b =
   unless b $ do
-      -- TODO: Add an option to return an error at the end if the above condition is true.
+      -- Future work: Add an option to return an error at the end if the above condition is true.
       printStyled StyleWarning "Distance treshold exceeded!"
 
 -- | Relative change per-slot. See 'relChangeDescending'.
---
--- TODO: The first component in the vector represents a slot. We might want to
--- change this type.
 --
 -- INVARIANT:
 --
 -- - the vector is sorted in ascending order on its second component.
 --
--- TODO: we might want to add a smart constructor for this.
+-- Future deliberation:
+-- * Consider using a SlotNo type (the first component represents a slot)
+-- * Use a smart constructor to ensure the invariant
 newtype RelativeChange = RelativeChange { relativeChange :: Vector (Double, Double) }
 
 maxRelativeChange :: RelativeChange -> Double

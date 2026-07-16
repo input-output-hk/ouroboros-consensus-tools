@@ -3,53 +3,57 @@
 {-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- TODO --
--- * disered output formats
--- * publishing option?
--- * running as a service?
--- * haskell92 support in consensus
-
-
--- | This program compares two versions of Consensus through the 'db-analyser' tool.
+-- | @beacon@ benchmarks a Cardano ledger + consensus integration through the
+-- 'db-analyser' tool, and lets you summarize, compare, or analyse the
+-- variance of results across stored runs.
 --
--- Given two versions 'A' and 'B', which can be specified as branches or
--- commits, this program performs the following steps:
+-- It is driven by a chain of subcommands (see 'BeaconCommand'); the typical
+-- flow is:
 --
--- 0. Install versions 'A' and 'B' 'db-analyser'. We assume version 'A' to be
---    the "baseline" version (see function 'compareMeasurements' below).
+-- 1. @build@ -- builds 'db-analyser' for a given Consensus commit\/branch\/tag
+--    via the 'db-analyser' nix flake output (see 'shellNixBuildVersion'),
+--    linking the resulting binary and its build plan under the beacon data
+--    directory. Invoked automatically by @run@ if not done already.
 --
--- 1. Run a given benchmark (analysis) using both versions of 'db-analyser'.
---    This benchmark is expected to produce a CVS file which contain data points
---    per slot. Each data point represents the measurement of a metric we're
---    interested in, for instance time spent applying a block, or the memory
---    that was consumed by said operation. Each column of the CSV file represents
---    either the slots that were analyzed or the measurements of a metric.
+-- 2. @run@ -- runs the built 'db-analyser' against a registered synthetic
+--    chain fragment (see @list-chains@), producing a JSON file of per-slot
+--    'Cardano.Beacon.SlotDataPoint.SlotDataPoint' measurements (e.g. time
+--    spent applying a block, or the memory it consumed), tagged with
+--    'Cardano.Beacon.RunMeta.BeaconRunMeta' (commit, compiler, chain, apply
+--    mode, backend, host, ...).
 --
--- 2. Compare both CSV files obtained in the previous step and summarize the
---    results. The results are summarized using text and plots. See below for
---    more details on how we compare the two benchmarks.
+-- 3. @store@ -- files a run's result under the run directory, in a
+--    subdirectory named after the run's slug (see
+--    'Cardano.Beacon.RunMeta.toSlug', which derives it from the run's
+--    metadata, minus 'host'), so repeated runs of the same configuration
+--    accumulate side by side. Invoked automatically by @run@.
+--
+-- 4. @summary@ \/ @compare@ \/ @variance@ -- report on the stored run(s) of
+--    one or two slugs, as text and Cairo-rendered plots. For @compare@, the
+--    first slug given is treated as the "baseline" (see 'compareMeasurements').
 --
 -- * Analysis
 --
--- At the moment we only compare the results of the 'benchmark-ledger-ops'
+-- At the moment we only analyse the results of the 'benchmark-ledger-ops'
 -- 'db-analyser' analysis. See the documentation of this flag for more details.
--- We might add other 'db-analyser' analysis in the future.
+-- We might add other 'db-analyser' analyses in the future.
 --
 -- * Caveats
 --
--- - The tool is fragile because it assumes the resulting CSV file has certain
---   headers, which depend on the output of 'db-analyser'. If the latter tool
---   changes the name of a header this tool will fail. Using 'db-analyser' as a
---   library might help mitigating this problem, however we first need to assess
---   the added value of this tool.
--- - Works on Unix systems only.
+-- - The tool is fragile because it assumes the resulting JSON file has a
+--   certain shape, which depends on the output of 'db-analyser' - as well
+--   as the CLI syntax of that binary. If the either of those has breaking
+--   changes, the @beacon@ tool will fail.
 --
--- * TODOs
+-- * Next up:
 --
--- - [ ] Create a markdown report.
--- - [ ] Return an error if the threshold is exceeded.
--- - [ ] Allow to configure metrics information (eg "lower is better", pretty name, etc).
--- - [ ] Perform a statistical analysis on the measurements.
+-- - [ ] Create a markdown or typst report.
+-- - [ ] Drop less portable Cairo rendering in favour of easyplot, or inline gnuplot inside typst.
+-- - [ ] Produce an error that can be reacted to if the metrics filter (thresholed, e.g.) is violated.
+-- - [ ] Allow to configure metrics filtering (eg "lower is better", pretty name, etc).
+-- - [ ] Perform a statistical analysis on the measurements / wire up CDF.hs.
+-- - [ ] Allow running as a service / automate inside a GitHub runner.
+
 module Main (main) where
 
 import           Cabal.Plan (PkgId (..), PkgName (..), PlanJson (..), Unit (..),
