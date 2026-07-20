@@ -105,9 +105,9 @@ data SlotDataPoint =
       , blockStats      :: ![Text]
       } deriving Show
 
-sdpTxCount :: SlotDataPoint -> Int
+sdpTxCount :: SlotDataPoint -> Maybe Int
 sdpTxCount SlotDataPoint{blockStats} = case blockStats of
   c_ : _
-    | Right (c, "") <- decimal c_ -> c
-  _                               -> 0
+    | Right (c, "") <- decimal c_ -> Just c
+  _                               -> Nothing
 

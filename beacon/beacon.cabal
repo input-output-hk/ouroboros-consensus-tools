@@ -70,6 +70,8 @@ executable beacon
     , statistics
     , text
     , time
+    , unix
+    , unix-compat
     , validation-selective
     , vector
     , vector-algorithms

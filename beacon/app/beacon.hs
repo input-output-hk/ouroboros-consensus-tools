@@ -66,16 +66,16 @@ import           Cardano.Beacon.Run
 import           Cardano.Beacon.RunMeta
 import           Cardano.Beacon.Types
 import           Control.Concurrent (threadDelay)
-import           Control.Exception (SomeException, bracket_, displayException,
-                     try)
-import           Control.Monad (foldM_, forM_, when)
+import           Control.Exception (SomeException, bracket_, catchJust,
+                     displayException, try)
+import           Control.Monad (foldM_, forM_, unless, when)
 import           Control.Monad.Extra (ifM)
 import           Data.Aeson (eitherDecodeFileStrict, eitherDecodeStrict',
                      encodeFile)
 import           Data.Either (rights)
-import           Data.List (intercalate, sort, sortBy)
+import           Data.List (intercalate, partition, sort, sortBy)
 import qualified Data.Map as Map
-import           Data.Maybe (fromJust, fromMaybe, listToMaybe)
+import           Data.Maybe (fromJust, fromMaybe, listToMaybe, mapMaybe)
 import           Data.Monoid
 import           Data.Ord (Down (..), comparing)
 import           Data.Time.Clock (getCurrentTime)
@@ -86,6 +86,11 @@ import qualified Paths_beacon as Paths (version)
 import           System.Directory
 import           System.Environment (getExecutablePath)
 import           System.FilePath
+import           System.IO (hClose, hPutStr)
+import           System.IO.Error (isAlreadyExistsError, isDoesNotExistError)
+import           System.Posix.Files (stdFileMode)
+import           System.Posix.IO (OpenFileFlags (creat, exclusive),
+                     OpenMode (WriteOnly), defaultFileFlags, fdToHandle, openFd)
 import           Text.Printf
 import           Text.Read (readMaybe)
 import           Validation (Validation (..))
@@ -119,22 +124,78 @@ chainRegisterFilename = "chain" </> "chain-register.json"
 runCommands :: RunEnvironment -> [BeaconCommand] -> IO ()
 runCommands env cmds
   | null lockFile = evalCommands
-  | otherwise = do
-      waitForLock True
-      bracket_ createLock removeLock evalCommands
+  | otherwise = bracket_ acquireLock releaseLock evalCommands
   where
-    evalCommands  = foldM_ runCommand env cmds
-    lockFile      = optLockFile $ runOptions env
-    createLock    = getExecutablePath >>= writeFile lockFile
-    removeLock    = removeFile lockFile
+    evalCommands = do
+      mapM_ warnDropped differing
+      foldM_ runCommand env same
+      where (same, differing) = sameAndDifferingVersions cmds
 
-    waitForLock firstCheck = do
-      locked <- doesFileExist lockFile
-      when locked $ do
-        when firstCheck $
-          printStyled StyleInfo $ "waiting for lock to be released: " ++ lockFile
-        threadDelay 1_000_000
-        waitForLock False
+    warnDropped cmd = printStyled StyleWarning $
+      "dropping " ++ show cmd
+      ++ ": Targeting more than one revision / compiler in a single beacon invocation is not supported."
+
+    lockFile = optLockFile $ runOptions env
+
+    -- Atomically (O_CREAT|O_EXCL) claims the lock, retrying after a wait
+    -- whenever someone else already holds it. This closes the race where two
+    -- parties both observe "no lock" and both proceed to write one.
+    acquireLock = tryClaim True
+      where
+        tryClaim firstAttempt = do
+          claimed <- claimLock
+          unless claimed $ do
+            when firstAttempt $
+              printStyled StyleInfo $ "waiting for lock to be released: " ++ lockFile
+            threadDelay 1_000_000
+            tryClaim False
+
+    claimLock = catchJust
+      (\e -> if isAlreadyExistsError e then Just () else Nothing)
+      (do
+        marker <- lockMarker
+        fd     <- openFd lockFile WriteOnly
+                    defaultFileFlags{ exclusive = True, creat = Just stdFileMode }
+        h      <- fdToHandle fd
+        hPutStr h marker
+        hClose h
+        pure True)
+      (const $ pure False)
+
+    -- Only remove the lock if it's still the one we created: an external
+    -- tool, or another beacon process, may have raced in and re-claimed it
+    -- right as we finished.
+    releaseLock = do
+      marker <- lockMarker
+      owned  <- catchJust
+        (\e -> if isDoesNotExistError e then Just () else Nothing)
+        ((== marker) <$> readFile lockFile)
+        (const $ pure False)
+      when owned $
+        catchJust
+          (\e -> if isDoesNotExistError e then Just () else Nothing)
+          (removeFile lockFile)
+          (const $ pure ())
+
+    -- Every beacon binary produces the same 'getExecutablePath', so pair it
+    -- with 'beaconProcessID' to identify this specific run, not just any run
+    -- of the same executable.
+    lockMarker = (\exePath -> exePath ++ " " ++ beaconProcessID) <$> getExecutablePath
+
+-- | Targeting more than one revision\/compiler in a single @beacon@
+-- invocation is not supported; split off any command that doesn't agree
+-- with the first revision\/compiler seen.
+sameAndDifferingVersions :: [BeaconCommand] -> ([BeaconCommand], [BeaconCommand])
+sameAndDifferingVersions cmds = partition matchesBaseline cmds
+  where
+    baseline = listToMaybe $ mapMaybe cmdVersion cmds
+
+    matchesBaseline cmd = maybe True (\v -> Just v == baseline) (cmdVersion cmd)
+
+    cmdVersion :: BeaconCommand -> Maybe Version
+    cmdVersion (BeaconBuild v)         = Just v
+    cmdVersion (BeaconDoRun _ v _ _ _) = Just v
+    cmdVersion _                       = Nothing
 
 runCommand :: RunEnvironment -> BeaconCommand -> IO RunEnvironment
 runCommand env BeaconListChains = do
@@ -202,13 +263,16 @@ runCommand env@Env{..} (BeaconDoRun bChain ver count apply mBackend) = do
     removeFile
   _ <- runCommand env (BeaconStoreRun currentRun)
 
+  -- For accurate benchmarks, repeating runs are to be done sequentially(!)
+  -- to avoid any undesired improvements due to data sharing / caching.
+  -- Do not change this to a parallel run strategy.
   if count > 1
     then runCommand env (BeaconDoRun bChain ver (count - 1) apply mBackend)
     else pure env{ runInstall = Nothing }
   where
-    currentData   = envBeaconDir env </> "beacon-slotdata.json"
-    currentMeta   = envBeaconDir env </> "beacon-metadata.json"
-    currentRun    = envBeaconDir env </> "beacon-result.json"
+    currentData   = envBeaconDir env </> "beacon-slotdata" <.> beaconProcessID <.> "json"
+    currentMeta   = envBeaconDir env </> "beacon-metadata" <.> beaconProcessID <.> "json"
+    currentRun    = envBeaconDir env </> "beacon-result"   <.> beaconProcessID <.> "json"
     beaconChain   = fromJust $ runChains >>= lookupChain bChain
     backend       = fromMaybe V2InMem mBackend
     mkMeta date manifest = BeaconRunMeta {

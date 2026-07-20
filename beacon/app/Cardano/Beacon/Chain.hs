@@ -57,7 +57,7 @@ renderChainsInfo (Chains chains) =
   map (T.unpack . infoLine) (Map.toAscList chains)
   where
     infoLine (ChainName name, BeaconChain{ chDescription = descr }) =
-      T.concat [alignRight 16 name, " -- ", fromMaybe "(no description provided)" descr]
+      T.concat [alignRight 24 name, " -- ", fromMaybe "(no description provided)" descr]
     alignRight width = T.justifyRight width ' ' . T.take width
 
 loadChainsInfo :: FilePath -> IO Chains

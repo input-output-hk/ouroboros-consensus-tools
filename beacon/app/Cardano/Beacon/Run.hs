@@ -48,7 +48,13 @@ envEmpty :: BeaconOptions -> RunEnvironment
 envEmpty = Env Nothing Nothing Nothing
 
 
-
+-- All commands are currently passed to the shell verbatim, unescaped.
+-- This enables using shell features like piping when developing new commands.
+-- However, this also removes a thin safety net vs using `proc`, so keep that in mind while working on shell commands.
+--
+-- Furthermore, `beacon` currently assumes a trusted / isolated enviroment and sanitized user input.
+-- If, in the future, `beacon` should ever rely on untrusted user input as part of some remote-controlled
+-- automation, sanitization will need to be added - e.g. of file paths read from the chain registry and similar.
 runShellEchoing :: EchoCommand -> String -> [String] -> IO String
 runShellEchoing echo cmd args = do
   when (echo == EchoCommand) $
@@ -67,7 +73,7 @@ shellCurlGitHubAPI env queryPath = do
   removeFile tempFile
   pure result
   where
-    tempFile = envBeaconDir env </> "temp.curl.json"
+    tempFile = envBeaconDir env </> "temp.curl" <.> beaconProcessID <.> "json"
     curlArgs =
       [ "-s -L"
       , "-H \"Accept: application/vnd.github+json\""
@@ -141,7 +147,7 @@ shellRunDbAnalyser env applMode backend BeaconChain{..} outFile = do
     rtsOpts = "-T -I0 -A16m -N2 -qb1 -qg1 --disable-delayed-os-memory-return"
 
     dbAnalyser  = installExePath . fromJust . runInstall $ env
-    tempResult  = envBeaconDir env </> "temp.result.json"
+    tempResult  = envBeaconDir env </> "temp.result"  <.> beaconProcessID <.> "json"
     echoing     = envEchoing env
 
     chDir

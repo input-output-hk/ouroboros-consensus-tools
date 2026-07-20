@@ -16,7 +16,7 @@ import           Cardano.Beacon.Types
 import           Cardano.Slotting.Slot (SlotNo (..))
 import           Control.Arrow ((>>>))
 import           Control.Monad (forM_, unless, when)
-import           Data.Maybe (isNothing)
+import           Data.Maybe (isNothing, mapMaybe)
 import           Data.Ord (Down (Down), comparing)
 import           Data.Set (Set)
 import qualified Data.Set as Set
@@ -109,23 +109,33 @@ infixl 9 .>
 
 
 summarizeBeaconRun :: BeaconRun -> Selector -> IO ()
-summarizeBeaconRun run sel@(Selector header _ unit) = do
-  printStyled StyleInfo $ "Summary for " ++ header ++ "/" ++ toSlug (rMeta run)
-  putStrLn $ "sample size: " ++ show (V.length sample) ++ " blocks"
-  putStrLn $ "   tx/block: " ++ show maxTxCount
-  putStrLn $ "       mean: " ++ withUnit mean ++ "   (" ++ withUnit sMin ++ " .. " ++ withUnit sMax ++ ")"
-  putStrLn $ " avg per tx: " ++ withUnit avgPerTx
+summarizeBeaconRun run sel@(Selector header _ unit)
+  | null points = printFatalAndDie $
+      "cannot summarize " ++ slug ++ ": run contains no data points"
+  | otherwise = case maxTxCount of
+      Nothing -> printStyled StyleWarning $
+        "cannot summarize " ++ slug ++ ": no block's stats parsed as a tx count"
+      Just n -> do
+        printStyled StyleInfo $ "Summary for " ++ header ++ "/" ++ slug
+        putStrLn $ "sample size: " ++ show (V.length sample) ++ " blocks"
+        putStrLn $ "   tx/block: " ++ show n
+        putStrLn $ "       mean: " ++ withUnit mean ++ "   (" ++ withUnit sMin ++ " .. " ++ withUnit sMax ++ ")"
+        putStrLn $ " avg per tx: " ++ if n == 0 then "n/a" else withUnit (mean / fromIntegral n)
+        where
+          runMaxTxOnly  = run {rData = applySortedDataPoints (filter ((== Just n) . sdpTxCount)) (rData run)}
+          sample        = runMaxTxOnly .> sel
+          mean          = Stat.mean sample
+          (sMin, sMax)  = Stat.minMax sample
   where
+    slug   = toSlug (rMeta run)
+    points = unPoints (rData run)
+
+    maxTxCount = case mapMaybe sdpTxCount points of
+      [] -> Nothing
+      cs -> Just (maximum cs)
+
     withUnit :: Double -> String
     withUnit d = (showFFloat (Just 2) d "") ++ unit
-
-    maxTxCount    = maximum $ map sdpTxCount $ unPoints $ rData run
-    runMaxTxOnly  = run {rData = applySortedDataPoints (filter ((== maxTxCount) . sdpTxCount)) (rData run)}
-
-    sample        = runMaxTxOnly .> sel
-    mean          = Stat.mean sample
-    (sMin, sMax)  = Stat.minMax sample
-    avgPerTx      = mean / fromIntegral maxTxCount
 
 
 -- | Compare two measurements (benchmarks).
@@ -162,6 +172,9 @@ compareMeasurements :: Bool -> BeaconRun -> BeaconRun -> Selector -> IO ()
 compareMeasurements emitPlots runA runB selector@(Selector header _ _) = do
     unless (runA .> selSlot == runB .> selSlot) $
       printFatalAndDie "Slot columns must be the same!"
+
+    when (V.null (runA .> selSlot)) $
+      printFatalAndDie "cannot compare: run(s) contain no data points"
 
     let threshold = 0.8
 
@@ -216,7 +229,10 @@ compareMeasurements emitPlots runA runB selector@(Selector header _ _) = do
           $ fmap relChange
           $ V.zip (dfA .> selector) (dfB .> selector)
         where
-          relChange (a, b) = (b - a) / max a b
+          relChange (a, b)
+            | m == 0    = 0
+            | otherwise = (b - a) / m
+            where m = max a b
 
 -- | Check that the relative change is above the given threshold.
 shouldBeAbove :: RelativeChange -> Double -> IO ()

@@ -17,6 +17,14 @@ import           Data.Map (Map)
 import           Data.Text as Text (Text)
 import           Data.Time.Clock (UTCTime)
 import           GHC.Generics (Generic)
+import           System.IO.Unsafe (unsafePerformIO)
+import           System.PosixCompat.Process
+
+
+{-# NOINLINE beaconProcessID #-}
+beaconProcessID :: String
+beaconProcessID = unsafePerformIO $
+  show <$> getProcessID
 
 
 data EchoCommand =
@@ -64,7 +72,7 @@ data Version = Version {
     -- Since relying on this is brittle anyway, we do not define a type for it, and rely instead on a free-form string.
   , verCompiler :: String
   }
-  deriving (Show, Generic)
+  deriving (Eq, Show, Generic)
 
 instance ToJSON Version where
   toJSON = genericToJSON aesonNoTagFields
