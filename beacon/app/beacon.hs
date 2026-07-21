@@ -72,12 +72,12 @@ import           Control.Monad (foldM_, forM_, unless, when)
 import           Control.Monad.Extra (ifM)
 import           Data.Aeson (eitherDecodeFileStrict, eitherDecodeStrict',
                      encodeFile)
-import           Data.Either (rights)
-import           Data.List (intercalate, partition, sort, sortBy)
+import           Data.Either (fromRight, rights)
+import           Data.List (intercalate, isPrefixOf, partition, sort, sortOn)
 import qualified Data.Map as Map
 import           Data.Maybe (fromJust, fromMaybe, listToMaybe, mapMaybe)
 import           Data.Monoid
-import           Data.Ord (Down (..), comparing)
+import           Data.Ord (Down (..))
 import           Data.Time.Clock (getCurrentTime)
 import           Data.Traversable (for)
 import           Data.Version (showVersion)
@@ -222,14 +222,70 @@ runCommand env BeaconLoadChains =
         else env
     Just{} -> pure env
 
+-- GitHub's commit-lookup API is rate-limited; hammering it with one query
+-- per invocation for a ref that's already fully resolved (a SHA or a
+-- sufficiently long prefix of one) risks exhausting that quota for no
+-- reason, and blocking benchmarking runs.
+-- That's way we cache such resolutions locally so repeat runs against
+-- an already-built revision don't need GitHub at all; a mutable ref (branch/tag name)
+-- is always resolved live, since only an immutable SHA is safe to reuse indefinitely.
 runCommand env (BeaconLoadCommit ref) = do
-  result <- shellCurlGitHubAPI env $ "/repos/IntersectMBO/ouroboros-consensus/commits/" ++ ref
-  case eitherDecodeStrict' result of
-    Left{} ->
-      printFatalAndDie $ "could not find commit for ref '" ++ ref ++ "' on GitHub"
-    Right ci -> do
-      printStyled StyleInfo $ "found commit on GitHub: " ++ ciCommitSHA1 ci
+  cacheHit <- if isHexRef ref then lookupRevCache else pure Nothing
+  case cacheHit of
+    Just ci -> do
+      printStyled StyleInfo $ "found commit in cache: " ++ ciCommitSHA1 ci
       pure env{ runCommit = Just ci }
+    Nothing -> do
+      result <- shellCurlGitHubAPI env $ "/repos/IntersectMBO/ouroboros-consensus/commits/" ++ ref
+      case eitherDecodeStrict' result of
+        Left{} ->
+          printFatalAndDie $ "could not find commit for ref '" ++ ref ++ "' on GitHub"
+        Right ci -> do
+          printStyled StyleInfo $ "found commit on GitHub: " ++ ciCommitSHA1 ci
+          writeRevCache ci
+          pure env{ runCommit = Just ci }
+  where
+    -- Below this length, an all-hex string is more likely a short named ref
+    -- (e.g. "faded") than an abbreviated SHA, so always resolve it live.
+    isHexRef s = length s >= 7 && all (`elem` ("0123456789abcdef" :: String)) s
+
+    -- Deleting <beacon-data>/rev-cache.json is always safe: it's a pure
+    -- cache, rebuilt lazily from GitHub as needed, so removing it just
+    -- costs the next lookup(s) an extra query, nothing more.
+    revCacheFile = envBeaconDir env </> "rev-cache.json"
+    binDir       = envBeaconDir env </> "bin"
+
+    readRevCache :: IO [CommitInfo]
+    readRevCache = ifM (doesFileExist revCacheFile)
+      (fromRight [] <$> eitherDecodeFileStrict revCacheFile)
+      (pure [])
+
+    -- * A unique SHA prefix match skips GitHub entirely.
+    -- * No match falls through to a live GitHub lookup.
+    -- * An ambiguous match is fatal rather than falling through: the cache is
+    --   a verified subset of GitHub's own commits, so ambiguity here implies
+    --   at least the same ambiguity upstream.
+    lookupRevCache = do
+      cache <- readRevCache
+      case filter (isPrefixOf ref . ciCommitSHA1) cache of
+        [ci] -> pure (Just ci)
+        []   -> pure Nothing
+        cis  -> printFatalAndDie $
+          "ambiguous SHA '" ++ ref ++ "': matches multiple cached revisions: "
+          ++ intercalate ", " (map ciCommitSHA1 cis)
+
+    -- Prunes any entry no longer backed by a linked build under bin/ (matched by its own
+    -- 9-char SHA prefix), and dedupes against the freshly resolved commit, before persisting it.
+    writeRevCache ci = do
+      cache   <- readRevCache
+      livePfx <- ifM (doesDirectoryExist binDir)
+        (map (take 9) <$> listDirectory binDir)
+        (pure [])
+      let survivors = filter
+            (\c -> ciCommitSHA1 c /= ciCommitSHA1 ci
+                && take 9 (ciCommitSHA1 c) `elem` livePfx)
+            cache
+      encodeFile revCacheFile (ci : survivors)
 
 runCommand env@Env{ runCommit = Nothing } cmd@(BeaconBuild ver) = do
   env' <- runCommand env (BeaconLoadCommit $ verGitRef ver)
@@ -347,7 +403,7 @@ runCommand env (BeaconSummary slug) =
 
 nextUnusedFilename :: FilePath -> IO FilePath
 nextUnusedFilename inSlugDir = do
-  fileNamesDesc <- sortBy (comparing Down) <$> listDirectory inSlugDir
+  fileNamesDesc <- sortOn Down <$> listDirectory inSlugDir
   let target =
         indexedName
         $ maybe 1 (+ 1)

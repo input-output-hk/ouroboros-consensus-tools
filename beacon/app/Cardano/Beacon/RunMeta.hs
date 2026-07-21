@@ -1,8 +1,7 @@
-{-# LANGUAGE DeriveGeneric      #-}
-{-# LANGUAGE DerivingVia        #-}
-{-# LANGUAGE OverloadedStrings  #-}
-{-# LANGUAGE RecordWildCards    #-}
-{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE DeriveGeneric     #-}
+{-# LANGUAGE DerivingVia       #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards   #-}
 
 module Cardano.Beacon.RunMeta (module Cardano.Beacon.RunMeta) where
 

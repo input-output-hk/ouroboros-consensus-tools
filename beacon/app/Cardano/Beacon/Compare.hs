@@ -3,6 +3,9 @@
 
 {-# OPTIONS_GHC -fno-warn-unused-top-binds #-}
 
+{- HLINT ignore "Use sortOn" -}
+{- HLINT ignore "Use <$>" -}
+
 module Cardano.Beacon.Compare (
     doCompare
   , doVariance
@@ -135,7 +138,7 @@ summarizeBeaconRun run sel@(Selector header _ unit)
       cs -> Just (maximum cs)
 
     withUnit :: Double -> String
-    withUnit d = (showFFloat (Just 2) d "") ++ unit
+    withUnit d = showFFloat (Just 2) d "" ++ unit
 
 
 -- | Compare two measurements (benchmarks).

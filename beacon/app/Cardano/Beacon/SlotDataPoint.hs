@@ -37,7 +37,7 @@ mkSortedDataPoints :: [SlotDataPoint] -> SortedDataPoints
 mkSortedDataPoints = SDP . sortOn slot
 
 applySortedDataPoints :: ([SlotDataPoint] -> [SlotDataPoint]) -> SortedDataPoints -> SortedDataPoints
-applySortedDataPoints f (SDP xs) = (SDP (f xs))
+applySortedDataPoints f (SDP xs) = SDP (f xs)
 
 
 instance FromJSON SlotDataPoint where
