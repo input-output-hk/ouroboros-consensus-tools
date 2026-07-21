@@ -1,6 +1,6 @@
 cabal-version:   3.0
 name:            beacon
-version:         0.1.0.0
+version:         0.2.0.0
 synopsis:        Benchmarking, exploration, and analysis of Consensus.
 description:
   Tool that can be used to compare the performance of two consensus versions, through `ouroboros-consensus:db-analyser`.
@@ -10,7 +10,7 @@ license-files:
   LICENSE
   NOTICE
 
-copyright:       2023 Input Output Global Inc (IOG)
+copyright:       2023-2026 Intersect.
 author:          IOHK Engineering Team
 maintainer:      operations@iohk.io
 category:        Network
@@ -20,28 +20,60 @@ extra-doc-files:
   README.md
 
 executable beacon
-  hs-source-dirs:   app
-  main-is:          beacon.hs
-  default-language: GHC2021
+  hs-source-dirs:     app
+  main-is:            beacon.hs
+  other-modules:
+    Cardano.Beacon.CDF
+    Cardano.Beacon.Chain
+    Cardano.Beacon.CLI
+    Cardano.Beacon.Compare
+    Cardano.Beacon.Console
+    Cardano.Beacon.Run
+    Cardano.Beacon.RunMeta
+    Cardano.Beacon.SlotDataPoint
+    Cardano.Beacon.Types
+    Paths_beacon
+
+  autogen-modules:    Paths_beacon
+  default-language:   Haskell2010
+  default-extensions:
+    LambdaCase
+    NamedFieldPuns
+    ViewPatterns
+
   ghc-options:
     -Wall -Wcompat -Wincomplete-uni-patterns
-    -Wincomplete-record-updates -Wpartial-fields -Widentities
-    -Wredundant-constraints -Wmissing-export-lists -Wunused-packages
+    -Wincomplete-record-updates -Widentities -Wredundant-constraints
+    -Wmissing-export-lists -Wunused-packages
     -Wno-unticked-promoted-constructors
 
+  if impl(ghc >=9.8)
+    ghc-options: -Wno-x-partial
+
   build-depends:
+    , aeson                 >=2.1.2
     , ansi-terminal
     , base
     , bytestring
-    , cassava
+    , cabal-plan
+    , cardano-slotting
     , Chart                 >=1.9
     , Chart-cairo           >=1.9
     , containers
     , directory
     , extra
+    , filepath
+    , fingertree
+    , hostname
     , optparse-applicative
     , process
-    , slugger
+    , statistics
     , text
+    , time
+    , unix
+    , unix-compat
+    , validation-selective
     , vector
     , vector-algorithms
+
+-- , ouroboros-consensus-cardano:unstable-cardano-tools  >= 0.12.1

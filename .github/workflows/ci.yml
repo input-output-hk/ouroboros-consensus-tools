@@ -17,115 +17,125 @@ on:
 jobs:
   build-test:
     name: Build and test
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.sys.os }}
+
     strategy:
-       fail-fast: false
-       matrix:
-         ghc: ["9.6.3"]
-         cabal: ["3.10.1.0"]
-         os: [ubuntu-latest]
+      fail-fast: false
+      matrix:
+        ghc: [&ghc-stable "9.6"]
+        cabal: [&cabal-version "3.16"]
+        sys:
+          - { os: ubuntu-latest, shell: bash }
+    defaults:
+      run:
+        shell: ${{ matrix.sys.shell }}
+
     env:
       # Modify this value to "invalidate" the Cabal cache.
-      CABAL_CACHE_VERSION: "2023-25-08"
+      CABAL_CACHE_VERSION: "2026-02-17"
 
     steps:
-    - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-    - name: Install base libraries
-      uses: input-output-hk/actions/base@latest
-      with:
-        use-sodium-vrf: false
+      - name: Install dependency libs and headers
+        run: |
+          sudo apt-get install -y --no-install-recommends libcairo2-dev
 
-    - name: Install Haskell
-      uses: input-output-hk/actions/haskell@latest
-      id: setup-haskell
-      with:
-        ghc-version: ${{ matrix.ghc }}
-        cabal-version: ${{ matrix.cabal }}
+      - name: Install base libraries
+        uses: input-output-hk/actions/base@latest
+        with:
+          use-sodium-vrf: false
 
-    - name: Update Cabal (Hackage and CHaP)
-      run: |
-        cabal clean
-        cabal update
+      - name: Install Haskell
+        uses: input-output-hk/actions/haskell@latest
+        id: setup-haskell
+        with:
+          ghc-version: ${{ matrix.ghc }}
+          cabal-version: ${{ matrix.cabal }}
 
-    # We create a `dependencies.txt` file that can be used to index the cabal
-    # store cache.
-    #
-    # We do not use `plan.json` directly because adding a dependency to our
-    # Cabal files which was already present somewhere else would result in a
-    # diferent plan, even though the set of dependencies is the same.
-    #
-    # In the future we should consider using `cabal-cache` like in the
-    # `cardano-node`'s GitHub workflow.
-    - name: Record dependencies to be used as cache keys
-      id: record-deps
-      run: |
-        cabal build all --dry-run --minimize-conflict-set
-        cat dist-newstyle/cache/plan.json \
-        | jq '.["install-plan"][].id' \
-        | sort \
-        | uniq > dependencies.txt
+      - name: Update Cabal (Hackage and CHaP)
+        run: |
+          cabal clean
+          cabal update
 
-    # This is used for caching the cabal store.
-    - name: Store month number as environment variable
-      run:  echo "MONTHNUM=$(/usr/bin/date -u '+%m')" >> $GITHUB_ENV
+      # We create a `dependencies.txt` file that can be used to index the cabal
+      # store cache.
+      #
+      # We do not use `plan.json` directly because adding a dependency to our
+      # Cabal files which was already present somewhere else would result in a
+      # diferent plan, even though the set of dependencies is the same.
+      #
+      # In the future we should consider using `cabal-cache` like in the
+      # `cardano-node`'s GitHub workflow.
+      - name: Record dependencies to be used as cache keys
+        id: record-deps
+        run: |
+          cabal build all --dry-run --minimize-conflict-set
+          cat dist-newstyle/cache/plan.json \
+          | jq '.["install-plan"][].id' \
+          | sort \
+          | uniq > dependencies.txt
 
-    # Restore the cabal store cache. See `save-cabal-store`.
-    #
-    # When we restore a previous cache and store a new key, we store both files
-    # that were already in the cache, and new files that were created. To
-    # prevent the cache from growing to quickly, we reset the cache each month.
-    #
-    # NOTE: it's vital that all restore-keys include the month number.
-    # Otherwise, we could restore a cache from a previous month, which makes
-    # caches grow unboundedly.
-    - name: "Restore cache for cabal-store"
-      uses: actions/cache/restore@v3
-      id: restore-cabal-store
-      with:
-        path: ${{ steps.setup-haskell.outputs.cabal-store }}
-        key: cabal-store-${{ env.CABAL_CACHE_VERSION }}-${{ runner.os }}-${{ matrix.ghc }}-${{ env.MONTHNUM }}-${{ hashFiles('dependencies.txt') }}
-        restore-keys: |
-          cabal-store-${{ env.CABAL_CACHE_VERSION }}-${{ runner.os }}-${{ matrix.ghc }}-${{ env.MONTHNUM }}-${{ hashFiles('dependencies.txt') }}
-          cabal-store-${{ env.CABAL_CACHE_VERSION }}-${{ runner.os }}-${{ matrix.ghc }}-${{ env.MONTHNUM }}-
+      # This is used for caching the cabal store.
+      - name: Store month number as environment variable
+        run: echo "MONTHNUM=$(/usr/bin/date -u '+%m')" >> $GITHUB_ENV
 
-    # This is used for caching the `dist-newstyle` directory.
-    - name: Store week number as environment variable
-      run: echo "WEEKNUM=$(/usr/bin/date -u '+%W')" >> $GITHUB_ENV
+      # Restore the cabal store cache. See `save-cabal-store`.
+      #
+      # When we restore a previous cache and store a new key, we store both files
+      # that were already in the cache, and new files that were created. To
+      # prevent the cache from growing to quickly, we reset the cache each month.
+      #
+      # NOTE: it's vital that all restore-keys include the month number.
+      # Otherwise, we could restore a cache from a previous month, which makes
+      # caches grow unboundedly.
+      - name: Restore cache for cabal-store
+        uses: actions/cache/restore@v4
+        id: restore-cabal-store
+        with:
+          path: ${{ steps.setup-haskell.outputs.cabal-store }}
+          key: cabal-store-${{ env.CABAL_CACHE_VERSION }}-${{ runner.os }}-${{ matrix.ghc }}-${{ env.MONTHNUM }}-${{ hashFiles('dependencies.txt') }}
+          restore-keys: |
+            cabal-store-${{ env.CABAL_CACHE_VERSION }}-${{ runner.os }}-${{ matrix.ghc }}-${{ env.MONTHNUM }}-${{ hashFiles('dependencies.txt') }}
+            cabal-store-${{ env.CABAL_CACHE_VERSION }}-${{ runner.os }}-${{ matrix.ghc }}-${{ env.MONTHNUM }}-
 
-    # Cache the `dist-newstyle` folder.
-    #
-    # See 'restore-cabal-store' for why we use the week number in the primary
-    # key and restore keys.
-    - name: "Cache dist-newstyle"
-      uses: actions/cache@v3
-      with:
-        path: dist-newstyle
-        key: cache-dist-${{ env.CABAL_CACHE_VERSION }}-${{ runner.os }}-${{ matrix.ghc }}-${{ env.WEEKNUM }}-${{ hashFiles('dependencies.txt') }}
-        restore-keys: |
-          cache-dist-${{ env.CABAL_CACHE_VERSION }}-${{ runner.os }}-${{ matrix.ghc }}-${{ env.WEEKNUM }}-${{ hashFiles('dependencies.txt') }}
-          cache-dist-${{ env.CABAL_CACHE_VERSION }}-${{ runner.os }}-${{ matrix.ghc }}-${{ env.WEEKNUM }}-
+      # This is used for caching the `dist-newstyle` directory.
+      - name: Store week number as environment variable
+        run: echo "WEEKNUM=$(/usr/bin/date -u '+%W')" >> $GITHUB_ENV
 
-    - name: Build dependencies
-      id: build-dependencies
-      run: cabal build --only-dependencies all -j
+      # Cache the `dist-newstyle` folder.
+      #
+      # See 'restore-cabal-store' for why we use the week number in the primary
+      # key and restore keys.
+      - name: Cache dist-newstyle
+        uses: actions/cache@v4
+        with:
+          path: dist-newstyle
+          key: cache-dist-${{ env.CABAL_CACHE_VERSION }}-${{ runner.os }}-${{ matrix.ghc }}-${{ env.WEEKNUM }}-${{ hashFiles('dependencies.txt') }}
+          restore-keys: |
+            cache-dist-${{ env.CABAL_CACHE_VERSION }}-${{ runner.os }}-${{ matrix.ghc }}-${{ env.WEEKNUM }}-${{ hashFiles('dependencies.txt') }}
+            cache-dist-${{ env.CABAL_CACHE_VERSION }}-${{ runner.os }}-${{ matrix.ghc }}-${{ env.WEEKNUM }}-
 
-    # Save the cabal store cache if the dependencies were succesfully built,
-    # even if subsequent consensus builds/tests/benchmarks could fail. This
-    # should shave off some running time because dependencies don't have to be
-    # rebuilt if any of the later steps fail and the job has to be re-run.
-    #
-    # See https://github.com/actions/cache/tree/v3/save#always-save-cache.
-    - name: "Save cache for cabal-store"
-      uses: actions/cache/save@v3
-      id: save-cabal-store
-      if: steps.build-dependencies.outcome == 'success' && steps.restore-cabal-store.outputs.cache-hit != 'true'
-      with:
-        path: ${{ steps.setup-haskell.outputs.cabal-store }}
-        key:  ${{ steps.restore-cabal-store.outputs.cache-primary-key }}
+      - name: Build dependencies
+        id: build-dependencies
+        run: cabal build --only-dependencies all -j
 
-    - name: Build projects [build]
-      run: cabal build all -j
+      # Save the cabal store cache if the dependencies were succesfully built,
+      # even if subsequent consensus builds/tests/benchmarks could fail. This
+      # should shave off some running time because dependencies don't have to be
+      # rebuilt if any of the later steps fail and the job has to be re-run.
+      #
+      # See https://github.com/actions/cache/tree/v3/save#always-save-cache.
+      - name: Save cache for cabal-store
+        uses: actions/cache/save@v4
+        id: save-cabal-store
+        if: steps.build-dependencies.outcome == 'success' && steps.restore-cabal-store.outputs.cache-hit != 'true'
+        with:
+          path: ${{ steps.setup-haskell.outputs.cabal-store }}
+          key: ${{ steps.restore-cabal-store.outputs.cache-primary-key }}
 
-    - name: Test
-      run: cabal test all -j
+      - name: Build project
+        run: cabal build all -j
+
+      - name: Test
+        run: cabal test all -j

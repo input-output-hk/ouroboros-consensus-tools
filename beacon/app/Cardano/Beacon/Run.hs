@@ -1,0 +1,198 @@
+{-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards   #-}
+
+module Cardano.Beacon.Run (
+    ConsoleStyle (..)
+  , RunEnvironment (..)
+  , envBeaconDir
+  , envEchoing
+  , envEmpty
+  , shellCurlGitHubAPI
+  , shellMergeMetaAndData
+  , shellNixBuildVersion
+  , shellRunDbAnalyser
+  ) where
+
+import           Cardano.Beacon.Chain
+import           Cardano.Beacon.CLI (ApplyMode (..), Backend,
+                     BeaconOptions (..), backendCLIOpts)
+import           Cardano.Beacon.Console
+import           Cardano.Beacon.Types
+import           Control.Exception (SomeException (..), try)
+import           Control.Monad (void, when)
+import           Data.Bool (bool)
+import           Data.ByteString.Char8 as BSC (ByteString, pack, readFile,
+                     writeFile)
+import           Data.Maybe (fromJust)
+import           System.Directory (createDirectoryIfMissing, doesFileExist,
+                     removeFile)
+import           System.FilePath (isRelative, (<.>), (</>))
+import           System.Process hiding (env)
+
+
+data RunEnvironment = Env
+  { runChains  :: Maybe Chains
+  , runCommit  :: Maybe CommitInfo
+  , runInstall :: Maybe InstallInfo
+  , runOptions :: BeaconOptions
+  }
+
+envEchoing :: RunEnvironment -> EchoCommand
+envEchoing = optEchoing . runOptions
+
+envBeaconDir :: RunEnvironment -> FilePath
+envBeaconDir = optBeaconDir . runOptions
+
+envEmpty :: BeaconOptions -> RunEnvironment
+envEmpty = Env Nothing Nothing Nothing
+
+
+-- All commands are currently passed to the shell verbatim, unescaped.
+-- This enables using shell features like piping when developing new commands.
+-- However, this also removes a thin safety net vs using `proc`, so keep that in mind while working on shell commands.
+--
+-- Furthermore, `beacon` currently assumes a trusted / isolated enviroment and sanitized user input.
+-- If, in the future, `beacon` should ever rely on untrusted user input as part of some remote-controlled
+-- automation, sanitization will need to be added - e.g. of file paths read from the chain registry and similar.
+runShellEchoing :: EchoCommand -> String -> [String] -> IO String
+runShellEchoing echo cmd args = do
+  when (echo == EchoCommand) $
+    printStyled StyleEcho asOneLine
+  try (readCreateProcess (shell asOneLine) "") >>= \case
+    Left (SomeException e)      -> printFatalAndDie $ show e
+    Right out                   -> pure out
+  where
+    asOneLine = concat [cmd, " ", unwords args]
+
+-- cf. https://docs.github.com/en/rest/commits/commits?apiVersion=2022-11-28#get-a-commit
+shellCurlGitHubAPI :: RunEnvironment -> String -> IO ByteString
+shellCurlGitHubAPI env queryPath = do
+  _ <- runShellEchoing (envEchoing env) "curl" curlArgs
+  result <- BSC.readFile tempFile
+  removeFile tempFile
+  pure result
+  where
+    tempFile = envBeaconDir env </> "temp.curl" <.> beaconProcessID <.> "json"
+    curlArgs =
+      [ "-s -L"
+      , "-H \"Accept: application/vnd.github+json\""
+      , "-H \"X-GitHub-Api-Version: 2022-11-28\""
+      , "-o", tempFile
+      , "https://api.github.com" ++ queryPath
+      ]
+
+shellNixBuildVersion :: RunEnvironment -> Version -> IO InstallInfo
+shellNixBuildVersion env ver@Version{verCompiler = compiler} = do
+  exists <- doesFileExist exePath
+  if exists
+    then printStyled StyleInfo "target binary already built and linked"
+    else do
+      currentSystem <- runShellEchoing echoing "nix" nixGetSystemArgs
+      printStyled StyleInfo $ "host system identified as " ++ currentSystem
+
+      let
+        exeDrv  = "hydraJobs." ++ currentSystem ++ ".native."
+                  ++ compiler
+                  ++ ".exesNoAsserts.db-analyser"
+        -- `hydraJobs.<system>.native.<compiler>.build` only exists on Linux:
+        -- consensus's CI skips generating it elsewhere to reduce load (see
+        -- `exesOnly` in ouroboros-consensus's nix/ci.nix). `legacyPackages`
+        -- exposes the same underlying package set on every platform; its
+        -- `hsPkgs.ouroboros-consensus.project.plan-nix` carries the exact same
+        -- (shared, project-wide) build plan without touching any of the
+        -- CI-gated `build` jobs.
+        planDrv = "legacyPackages." ++ currentSystem ++ "." ++ hsPkgsPath compiler
+                  ++ "ouroboros-consensus.project.plan-nix"
+        hsPkgsPath = \case
+          "haskell914" -> "hsPkgs.projectVariants.ghc914.hsPkgs."
+          _            -> "hsPkgs."
+
+      createDirectoryIfMissing False binDir
+      void $ runShellEchoing echoing "nix" (nixBuildArgs exeDrv linkExe)
+      void $ runShellEchoing echoing "nix" (nixBuildArgs planDrv linkPlan)
+
+  nix_path <- runShellEchoing echoing "readlink" [linkExe]
+  return $ InstallInfo {
+    installExePath  = exePath,
+    installPlanPath = linkPlan,
+    installNixPath  = head . lines $ nix_path,
+    installVersion  = ver
+  }
+  where
+    echoing  = envEchoing env
+    sha      = ciCommitSHA1 . fromJust . runCommit $ env
+    binDir   = envBeaconDir env </> "bin"
+    tag      = take 9 sha ++ "-" ++ compiler
+    linkExe  = binDir </> tag
+    linkPlan = binDir </> tag <.> "plan-json"
+    exePath  = linkExe </> "bin" </> "db-analyser"
+
+    flakeRef    = "github:IntersectMBO/ouroboros-consensus/" ++ sha
+
+    nixBuildArgs drvPath outLink = ["build", flakeRef ++ "#" ++ drvPath, "-o", outLink]
+    nixGetSystemArgs             = ["eval", "--impure", "--raw", "--expr", "'builtins.currentSystem'"]
+
+shellRunDbAnalyser :: RunEnvironment -> ApplyMode -> Backend -> BeaconChain -> FilePath -> IO ()
+shellRunDbAnalyser env applMode backend BeaconChain{..} outFile = do
+  onlyImmutableFlag <-
+    whenTrue "--only-immutable-db" <$> detectDbAnalyserNeedsOnlyImmutable env
+
+  _ <- runShellEchoing echoing dbAnalyser (dbAnalyserArgs <> onlyImmutableFlag)
+  callJQ echoing outFile jqToListArgs
+  removeFile tempResult
+  where
+    -- These are the compiled-in options specified in cardano-node.cabal, used for relese builds.
+    -- We adhere to those for maximum fidelity of beacon benchmarks.
+    rtsOpts = "-T -I0 -A16m -N2 -qb1 -qg1 --disable-delayed-os-memory-return"
+
+    dbAnalyser  = installExePath . fromJust . runInstall $ env
+    tempResult  = envBeaconDir env </> "temp.result"  <.> beaconProcessID <.> "json"
+    echoing     = envEchoing env
+
+    chDir
+      | isRelative chHomeDir  = envBeaconDir env </> "chain" </> chHomeDir
+      | otherwise             = chHomeDir
+
+    dbAnalyserArgs = filter (not . null)
+      [ "--db", chDir </> chDbDir
+      , maybe "" (\s -> "--analyse-from " ++ show s) chFromSlot
+      , "--benchmark-ledger-ops"
+      , if applMode == Reapply then "--reapply" else ""
+      , "--out-file", tempResult
+      , maybe "" (\b -> "--num-blocks-to-process " ++ show b) chProcessBlocks
+      , backendCLIOpts backend
+      , "--config", chDir </> chConfigFile
+      , "+RTS", rtsOpts, "-RTS"
+      ]
+
+    jqToListArgs =
+      [ "-M"
+      , "'map(inputs)'"
+      , tempResult
+      ]
+
+    whenTrue t = bool [] [t]
+
+detectDbAnalyserNeedsOnlyImmutable :: RunEnvironment -> IO Bool
+detectDbAnalyserNeedsOnlyImmutable env = do
+  out <- runShellEchoing echoing dbAnalyser ["--help"]
+  return $ "--only-immutable-db" `elem` words out
+  where
+    dbAnalyser  = installExePath . fromJust . runInstall $ env
+    echoing     = envEchoing env
+
+shellMergeMetaAndData :: RunEnvironment -> FilePath -> FilePath -> FilePath -> IO ()
+shellMergeMetaAndData env srcMeta srcData dest =
+  callJQ (envEchoing env) dest
+    [ "-M"
+    , "'{\"meta\": $meta[0], \"data\": $data[0]}'"
+    , "--slurpfile", "meta", srcMeta
+    , "--slurpfile", "data", srcData
+    , "--null-input"
+    ]
+
+callJQ :: EchoCommand -> FilePath -> [String] -> IO ()
+callJQ echoing dest jqArgs = do
+  out <- BSC.pack <$> runShellEchoing echoing "jq" jqArgs
+  BSC.writeFile dest out
