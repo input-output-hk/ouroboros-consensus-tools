@@ -13,6 +13,7 @@
         pkgs.jq
         pkgs.gh
         pkgs.pkg-config
+        pkgs.time
       ];
 
       tools = {

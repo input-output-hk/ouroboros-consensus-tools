@@ -1,5 +1,6 @@
 {-# LANGUAGE NamedFieldPuns    #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards   #-}
 
 {-# OPTIONS_GHC -fno-warn-unused-top-binds #-}
 
@@ -120,10 +121,14 @@ summarizeBeaconRun run sel@(Selector header _ unit)
         "cannot summarize " ++ slug ++ ": no block's stats parsed as a tx count"
       Just n -> do
         printStyled StyleInfo $ "Summary for " ++ header ++ "/" ++ slug
-        putStrLn $ "sample size: " ++ show (V.length sample) ++ " blocks"
-        putStrLn $ "   tx/block: " ++ show n
-        putStrLn $ "       mean: " ++ withUnit mean ++ "   (" ++ withUnit sMin ++ " .. " ++ withUnit sMax ++ ")"
-        putStrLn $ " avg per tx: " ++ if n == 0 then "n/a" else withUnit (mean / fromIntegral n)
+        putStrLn   $ "sample size: " ++ show (V.length sample) ++ " blocks"
+        putStrLn   $ "   tx/block: " ++ show n
+        putStrLn   $ "       mean: " ++ withUnit mean ++ "   (" ++ withUnit sMin ++ " .. " ++ withUnit sMax ++ ")"
+        putStrLn   $ " avg per tx: " ++ if n == 0 then "n/a" else withUnit (mean / fromIntegral n)
+        forM_ (rProcessStats run) $ \ProcessStats{..} -> do
+          putStrLn $ " proc stats: * max RSS:       " ++ show statsMaxResidentSetSize ++ " B"
+          putStrLn $ "             * fs blocks in:  " ++ show statsFileSystemInputs
+          putStrLn $ "             * fs blocks out: " ++ show statsFileSystemOutputs
         where
           runMaxTxOnly  = run {rData = applySortedDataPoints (filter ((== Just n) . sdpTxCount)) (rData run)}
           sample        = runMaxTxOnly .> sel

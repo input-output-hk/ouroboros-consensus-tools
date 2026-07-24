@@ -22,7 +22,7 @@ data BeaconCommand =
     -- commands can be chained
       BeaconListChains
     | BeaconBuild       !Version
-    | BeaconDoRun       !ChainName !Version !Int !ApplyMode !(Maybe Backend)
+    | BeaconDoRun       !ChainName !Version !Int !ApplyMode !(Maybe Backend) !MemLimitOpts
     | BeaconStoreRun    !FilePath
     | BeaconSummary     !String
     | BeaconCompare     !String !(Maybe String)
@@ -109,7 +109,7 @@ parseCommand =  subparser $ mconcat
   , op "list-chains" "List registered chain fragments that beacon can be run on"
       (pure BeaconListChains)
   , op "run" "Perform a beacon run"
-      (BeaconDoRun <$> (ChainName . Text.pack <$> parseChainName) <*> parseVersion <*> parseCount <*> parseApplyMode <*> parseBackend)
+      (BeaconDoRun <$> (ChainName . Text.pack <$> parseChainName) <*> parseVersion <*> parseCount <*> parseApplyMode <*> parseBackend <*> parseMemLimitOpts)
   , op "store" "Store a run, moving the given file"
       (BeaconStoreRun <$> parseFileName)
   , op "variance" "Perform variace analysis on all runs for certain slug"
@@ -201,3 +201,38 @@ parseCommand =  subparser $ mconcat
               , help "use v2 LSM backend"
               ]
         ]
+
+    parseMemLimitOpts :: Parser MemLimitOpts
+    parseMemLimitOpts =
+      MemLimitOpts
+        <$> optional (parseSizeOption "heap-limit"
+              "Set a GHC RTS heap limit (-M<SIZE>) for db-analyser. Applies \
+              \regardless of --mem-limit / --lsm-no-cache.")
+        <*> optional (parseSizeOption "mem-limit"
+              "Run db-analyser under a cgroup memory limit (systemd-run \
+              \--user --scope). Forces real disk I/O for on-disk backends by \
+              \pressuring the OS page cache; --lsm-no-cache is a more direct \
+              \alternative where the db-analyser build supports it.")
+        <*> switch
+              (mconcat
+                [ long "lsm-no-cache"
+                , help "Pass --lsm-no-cache to db-analyser: bypass the OS \
+                       \page cache (O_DIRECT) for the LSM backend's UTxO \
+                       \table, instead of relying on --mem-limit. Requires a \
+                       \db-analyser build with this flag; the run fails if \
+                       \unsupported."
+                ])
+
+    parseSizeOption :: String -> String -> Parser String
+    parseSizeOption flagName description = option sizeReader
+      (mconcat
+        [ long flagName
+        , metavar "SIZE"
+        , help description
+        ])
+      where
+        sizeReader = eitherReader $ \s -> case normalizeSize s of
+          Just canonical -> Right canonical
+          Nothing        -> Left $
+            "invalid size '" ++ s ++ "': expected e.g. 512M, 2G, or a bare "
+            ++ "byte count (M/G only; K/T are out of range for this feature)"
