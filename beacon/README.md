@@ -38,3 +38,21 @@ default `./beacon-data`); use `beacon list-chains` to see what's registered.
 - `list-chains` — list the chain fragments registered in the data directory.
 
 Run `cabal run beacon -- <command> --help` for a command's options.
+
+
+Adds two alternative, independently-composable mechanisms to force the LSM backend to exercise real disk I/O during a beacon run, plus observability for both:
+
+- `--heap-limit <SIZE>`: a GHC RTS heap cap (-M<SIZE>), applicable regardless of backend or the other two flags.
+- `--mem-limit <SIZE>`: wraps `db-analyser` in a cgroup memory limit via `systemd-run --user --scope` (MemoryHigh, with a derived MemoryMax safety net), pressuring the OS page cache to force real disk I/O.
+- `--lsm-no-cache`: passes a new `--lsm-no-cache` flag through to db-analyser (bypasses the OS page cache via O_DIRECT for the LSM backend), a more direct alternative to `--mem-limit` where the db-analyser build supports it.
+
+Capability detection (db-analyser --help scrutiny, plus a functional probe that a `time -v` binary on `PATH` actually behaves like GNU time) now happens once per resolved install, stored as `EnvironmentCapabilities` in `RunEnvironment`, rather than re-probed or threaded as loose booleans.
+
+Every `db-analyser` invocation is wrapped with `time -v` when available, recording peak RSS / block I/O counts as a new optional `ProcessStats` field on `BeaconRun`
+
+The chosen limits themselves are recorded on `BeaconRunMeta` - `toSlug` encodes the new configuration:
+* no limits at all:  slugs identically to before
+* ` --lsm-no-cache`: folds into the backend segment ("lsm" / "lsmnc", as it's meaningless outside the LSM backend)
+* heap/mem limits: get one shared slug segment
+
+Also adds GNU time to the nix devShell, to guarantee a GNU `time` binary.
