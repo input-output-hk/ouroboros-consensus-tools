@@ -168,7 +168,7 @@ median :: Vector Double -> Double
 median = Stat.median Stat.medianUnbiased
 
 summarizeBeaconRun :: Bool -> BeaconRun -> Selector -> IO ()
-summarizeBeaconRun withHeader run (Selector header selProjection unit perTx) = do
+summarizeBeaconRun withChainInfo run (Selector header selProjection unit perTx) = do
     mSample <- selectMaxTxSample run
     forM_ mSample $ \(n, points) -> do
       let sample       = V.map selProjection points
@@ -176,13 +176,14 @@ summarizeBeaconRun withHeader run (Selector header selProjection unit perTx) = d
           medianV      = median sample
           (sMin, sMax) = Stat.minMax sample
       printStyled StyleInfo $ "Summary for " ++ header ++ "/" ++ toSlug (rMeta run)
-      when withHeader $ do
+      when withChainInfo $ do
         putStrLn $ "sample size: " ++ show (V.length points) ++ " blocks"
         putStrLn $ "   tx/block: " ++ show n
       putStrLn   $ "       mean: " ++ withUnit meanV ++ "   (" ++ withUnit sMin ++ " .. " ++ withUnit sMax ++ ")"
       putStrLn   $ "     median: " ++ withUnit medianV
-      when perTx $
-        putStrLn $ " avg per tx: " ++ if n == 0 then "n/a" else withUnit (meanV / fromIntegral n)
+      when perTx $ do
+        putStrLn $ " avg per tx (mean):   " ++ if n == 0 then "n/a" else withUnit (meanV / fromIntegral n)
+        putStrLn $ " avg per tx (median): " ++ if n == 0 then "n/a" else withUnit (medianV / fromIntegral n)
   where
     withUnit :: Double -> String
     withUnit d = showFFloat (Just 2) d "" ++ unit

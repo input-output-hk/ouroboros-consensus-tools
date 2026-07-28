@@ -5,9 +5,10 @@
 `beacon` benchmarks how long it takes to *validate* blocks - and by proxy, transactions -
 for a given Ledger + Consensus implementation.
 
-It uses `db-analyser` as a benchmarkable, and various chain fragments 
-as benchmarking data. The chain fragment represents the workload, which is
-replayed through the real validation code path, and timings for per-block validation work are recorded.
+`beacon` is the harness: it drives two benchmarkables — the `db-analyser`
+binary (i.e. which Ledger + Consensus commit) and the chain fragment (the
+workload) — replaying the fragment through the real validation code path
+and recording timings for per-block validation work.
 
 Every run separates a one-off *construction* phase (initial ledger
 state construction from genesis) from the repeated, per-block *validation*
@@ -57,12 +58,15 @@ beacon run -n <chain-fragment> --rev <consensus-rev> --lsm --lsm-no-cache --heap
 with `O_DIRECT`, bypassing the page cache entirely — every read the
 validation loop makes genuinely goes to disk, deterministically.
 
-Scaling the `--heap-limit` is needed to control the amount of readbacks from
-disk. A sensible heap limit can only be found empirically for a specific
-chain fragment (or groups of chain fragments having identically sized
-ledger states in their geneses).
+Scaling the `--heap-limit` is needed to force the loop to pay a real GC cost
+it would otherwise avoid — confirmed (via repeated runs) to show up as
+increased `totalTime`, potentially but not necessarily as a change in
+disk-read volume. A sensible heap limit can only be found empirically for a
+specific chain fragment (or groups of chain fragments having identically
+sized ledger states in their geneses).
 
-Adding a tight `--mem-limit` on top of `--lsm-no-cache` was tried and
+Adding a tight `--mem-limit` (which imposes an OS-level cgroup memory cap;
+see below) on top of `--lsm-no-cache` was tried and
 does *not* help: since the validation loop's memory ceiling is controlled
 by the heap limit, and the loop is already disk-bound from `--lsm-no-cache`,
 the extra constraint has essentially nothing left to do there — except
@@ -87,7 +91,7 @@ but with real drawbacks compared to `--lsm-no-cache`:
   heap limit above apply: The right `<SIZE>` has to be found empirically for
   each chain fragment rather than assumed.
 - **It's probabilistic, not deterministic, for the phase that matters.**
-  Wwhether cgroup memory pressure happens to
+  Whether cgroup memory pressure happens to
   evict exactly the blocks the loop is about to read isn't guaranteed
   the way `O_DIRECT` does. The same `--mem-limit` can behave differently between runs.
 
@@ -111,7 +115,7 @@ Varying this axis therefore means benchmarking against a *different* chain
 fragment, not varying the content within one. A fragment of simple value
 transfers exercises different code paths than a fragment dominated by
 script execution, and different transaction or block shapes stress the
-ledger/backing-store interaction differently Comparing validation time across
+ledger/backing-store interaction differently. Comparing validation time across
 fragments can show which kinds of transactions are sensitive to
 backend choice and which are dominated by CPU-bound validation work.
 
@@ -134,16 +138,40 @@ of the reapplication control-flow path specifically.
 ledger operations (`mut`/`mut_blockApply`, the figures used above) and the
 true wall-clock time for the same operations (`totalTime`). These are not
 two views of the same number: GHC's runtime accounts elapsed time into
-exactly two buckets, mutator and GC, with nothing left over — so
-`totalTime` is (to rounding) `mut + gc`, and mutator time by construction
-excludes GC pauses. It also, empirically, excludes most of the cost of a
-disk read forced by the "sweet spot" configuration above: on real
+exactly two buckets, mutator and GC, with nothing left over — confirmed
+directly against `GHC.Stats.RTSStats` (`mutator_elapsed_ns`/`gc_elapsed_ns`,
+summing to `elapsed_ns`; there is no third, OS-wait bucket for time blocked
+on I/O) — so `totalTime` is (to rounding) `mut + gc`, and mutator time by
+construction excludes GC pauses. It also, empirically, excludes most of the
+cost of a disk read forced by the "sweet spot" configuration above: on real
 measurements, a block whose LSM read was forced from disk via `--lsm-no-cache`
 showed `mut` largely unchanged from the same block served out of page
 cache, while the GC time for that block increased sharply instead. So
 `mut_blockApply` answers "how expensive is the validation logic", and
 `totalTime` is the only field that can answer "how expensive was this
 block, including GC and any disk I/O it triggered."
+
+*Open question:* why the cost lands specifically in `gc` rather than `mut`
+isn't fully pinned down. Checking `blockio-uring` (the LSM backend's I/O
+layer) rules out a couple of tempting explanations: its read/write buffers
+must be pinned, but that's true for every read regardless of cache mode,
+so it can't be what distinguishes a forced-disk read from a cached one;
+and waiting for a completion is a plain, cooperative `MVar` block on the
+calling thread — the actual blocking OS call runs on a separate, dedicated
+completion thread — so the wait itself doesn't obviously cost either
+bucket by construction. The likeliest explanation is that a GC already due
+from ordinary heap growth lands inside the slow block rather than an
+adjacent fast one, and is itself longer there — but confirming that would
+need an eventlog trace correlating GC pauses against read completions,
+which hasn't been done.
+
+That gap doesn't undermine using `totalTime` here, though: it's an
+exhaustive account of wall-clock time by construction, so it's already the
+right number for "how expensive was this block" regardless of *why* the
+RTS attributes the cost the way it does. The `majGcCount` split below
+doesn't depend on the mechanism either — it separates blocks by whether a
+major GC actually occurred, the causally relevant fact for this benchmark
+independent of the deeper reason that GC ran long.
 
 That makes `totalTime` the metric of interest whenever the backend axis's
 I/O cost specifically is the question — but it is a much noisier metric

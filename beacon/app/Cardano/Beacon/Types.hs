@@ -162,8 +162,7 @@ instance FromJSON ProcessStats where
 -- | Parse a size string like \"512M\", \"2G\" (M\/G suffix, base-1024,
 -- case-insensitive) or a bare byte count, into a number of bytes. \'K\'\/\'T\'
 -- suffixes are rejected: they're out of the realistic range for a memory
--- limit on this tool (from tens of MB to a few hundred GB), so 'normalizeSize'
--- only ever produces\/accepts M or G.
+-- limit on this tool.
 parseSizeBytes :: String -> Maybe Integer
 parseSizeBytes s = do
   let (digits, suffix) = span isDigit s
@@ -181,16 +180,7 @@ gibi = 1024 * 1024 * 1024
 
 -- | Validate and canonicalize a user-supplied @--heap-limit@\/@--mem-limit@
 -- size string. The canonical form is always a whole number of at most 3
--- digits followed by \'M\' or \'G\' (uppercase, no decimal point) -- the
--- realistic range for a memory limit on this tool.
---
--- An explicit \"...M\"\/\"...G\" input is only case-normalized and
--- range-checked (1-999): it's kept in the exact unit\/magnitude given, never
--- reinterpreted in the other unit, so e.g. \"512M\" always stays exactly
--- 512 MiB and never silently becomes \"1G\". A bare byte count, which has no
--- unit of its own to preserve, is instead rounded to the nearer of M or G --
--- this is the one case where the stored value may not exactly equal what was
--- typed, by construction.
+-- digits followed by \'M\' or \'G\' (uppercase, no decimal point).
 normalizeSize :: String -> Maybe String
 normalizeSize s = case span isDigit s of
   ([], _)           -> Nothing
@@ -206,8 +196,6 @@ normalizeSize s = case span isDigit s of
       | n >= 1 && n <= 999 = Just (show (n :: Integer) ++ unit)
       | otherwise          = Nothing
 
-    -- Only reached for a bare byte count: no unit of its own means some
-    -- rounding is unavoidable to land on a whole M/G value.
     roundToNearestUnit bytes
       | roundedG >= 1 = show roundedG ++ "G"
       | otherwise     = show (roundDiv bytes mebi) ++ "M"

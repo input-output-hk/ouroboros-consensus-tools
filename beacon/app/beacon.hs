@@ -193,9 +193,9 @@ sameAndDifferingVersions cmds = partition matchesBaseline cmds
     matchesBaseline cmd = maybe True (\v -> Just v == baseline) (cmdVersion cmd)
 
     cmdVersion :: BeaconCommand -> Maybe Version
-    cmdVersion (BeaconBuild v)         = Just v
+    cmdVersion (BeaconBuild v)           = Just v
     cmdVersion (BeaconDoRun _ v _ _ _ _) = Just v
-    cmdVersion _                       = Nothing
+    cmdVersion _                         = Nothing
 
 runCommand :: RunEnvironment -> BeaconCommand -> IO RunEnvironment
 runCommand env BeaconListChains = do

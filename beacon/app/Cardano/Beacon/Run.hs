@@ -62,7 +62,7 @@ envEmpty = Env Nothing Nothing Nothing Nothing
 runShellEchoing :: EchoCommand -> String -> [String] -> IO String
 runShellEchoing echo cmd args =
   tryShellEchoing echo cmd args >>= \case
-    Left (SomeException e) -> printFatalAndDie $ show e
+    Left (SomeException e)  -> printFatalAndDie $ show e
     Right out               -> pure out
 
 -- A non-fatal variant of 'runShellEchoing', for callers that need to probe
@@ -263,10 +263,10 @@ probeTimeVerbose env = do
   case mPath of
     Nothing   -> unavailable "no 'time' binary found on PATH"
     Just path -> do
-      result <- tryShellEchoing echoing path ["-v", "-o", probeFile, "--", "true"]
+      result <- tryShellEchoing echoing path ["-v", "-o", probeFile, "--", "true", "2>/dev/null"]
       case result of
-        Left (SomeException e) -> unavailable (show e)
-        Right _ -> do
+        Left SomeException{} -> unavailable "'time' binary does not accept -v/-o"
+        Right{} -> do
           exists <- doesFileExist probeFile
           if not exists
             then unavailable "'time -v' produced no report file"
