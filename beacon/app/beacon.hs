@@ -303,8 +303,10 @@ runCommand env@Env{ runChains = Nothing } cmd@(BeaconDoRun bChain _ _ _ _ _) = d
     Just{}  -> runCommand env' cmd
 runCommand env@Env{ runInstall = Nothing } cmd@(BeaconDoRun _ ver _ _ _ _) = do
   env' <- runCommand env (BeaconBuild ver)
-  mCaps <- detectEnvironmentCapabilities env'
-  runCommand env' { runCapabilities = mCaps } cmd
+  runCommand env' cmd
+runCommand env@Env{ runInstall = Just{}, runCapabilities = Nothing } cmd@BeaconDoRun{} = do
+  caps <- detectEnvironmentCapabilities env
+  runCommand env { runCapabilities = Just caps } cmd
 runCommand env@Env{..} (BeaconDoRun bChain ver count apply mBackend memLimitOpts) = do
   printStyled StyleInfo "performing run..."
 

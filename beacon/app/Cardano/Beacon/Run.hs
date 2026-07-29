@@ -20,13 +20,13 @@ import           Cardano.Beacon.CLI (ApplyMode (..), Backend (..),
                      BeaconOptions (..), backendCLIOpts)
 import           Cardano.Beacon.Console
 import           Cardano.Beacon.Types
-import           Control.Exception (SomeException (..), try)
-import           Control.Monad (forM, void, when)
+import           Control.Exception (SomeException (..), finally, try)
+import           Control.Monad (void, when)
 import           Data.ByteString.Char8 as BSC (ByteString, pack, readFile,
                      unpack, writeFile)
 import           Data.Char (isSpace)
-import           Data.List (isInfixOf, isPrefixOf)
-import           Data.Maybe (fromJust, listToMaybe)
+import           Data.List (dropWhileEnd, isInfixOf, isPrefixOf)
+import           Data.Maybe (fromJust, isJust, listToMaybe)
 import           System.Directory (createDirectoryIfMissing, doesFileExist,
                      findExecutable, removeFile)
 import           System.FilePath (isRelative, (<.>), (</>))
@@ -155,6 +155,12 @@ shellRunDbAnalyser env applMode backend memLimitOpts BeaconChain{..} outFile = d
       ++ "support it (missing from its --help output); build db-analyser "
       ++ "from a commit that includes it."
 
+  when (isJust (mloMemLimit memLimitOpts) && not (capMemLimit caps)) $
+    printFatalAndDie
+      "--mem-limit requested, but this host can't enforce it (no \
+      \systemd-run, or missing cgroup delegation) -- run would go \
+      \unconstrained."
+
   processStats <- runDbAnalyser dbAnalyser (dbAnalyserArgs <> onlyImmutableFlag <> lsmNoCacheFlag)
   callJQ echoing outFile jqToListArgs
   removeFile tempResult
@@ -240,17 +246,19 @@ shellRunDbAnalyser env applMode backend memLimitOpts BeaconChain{..} outFile = d
 
 -- | Detects, what the targeted db-analyser binary and host environment support,
 -- so downstream command-building never has to re-probe (or thread loose booleans around).
-detectEnvironmentCapabilities :: RunEnvironment -> IO (Maybe EnvironmentCapabilities)
-detectEnvironmentCapabilities env =
-  forM (runInstall env) $
-    \(installExePath -> dbAnalyser) -> do
-      helpOut <- words <$> runShellEchoing (envEchoing env) dbAnalyser ["--help"]
-      timeVerbose <- probeTimeVerbose env
-      pure EnvironmentCapabilities
-        { capOnlyImmutableDb = "--only-immutable-db" `elem` helpOut
-        , capLsmNoCache      = "--lsm-no-cache" `elem` helpOut
-        , capTimeVerbose     = timeVerbose
-        }
+detectEnvironmentCapabilities :: RunEnvironment -> IO EnvironmentCapabilities
+detectEnvironmentCapabilities Env{ runInstall = Nothing } =
+  printFatalAndDie "detectEnvironmentCapabilities: missing db-analyser install path"
+detectEnvironmentCapabilities env@Env{ runInstall = Just install } = do
+  helpOut <- words <$> runShellEchoing (envEchoing env) (installExePath install) ["--help"]
+  timeVerbose <- probeTimeVerbose env
+  memLimit    <- probeMemLimit env
+  pure EnvironmentCapabilities
+    { capOnlyImmutableDb = "--only-immutable-db" `elem` helpOut
+    , capLsmNoCache      = "--lsm-no-cache" `elem` helpOut
+    , capMemLimit        = memLimit
+    , capTimeVerbose     = timeVerbose
+    }
 
 -- Functionally verifies that a `time` binary resolved from PATH actually
 -- behaves like GNU time's `-v` (BSD/busybox `time` variants don't support
@@ -262,7 +270,16 @@ probeTimeVerbose env = do
   mPath <- findExecutable "time"
   case mPath of
     Nothing   -> unavailable "no 'time' binary found on PATH"
-    Just path -> do
+    Just path -> probe path `finally` cleanupProbeFile
+  where
+    echoing   = envEchoing env
+    probeFile = envBeaconDir env </> "temp.time-probe" <.> beaconProcessID
+
+    cleanupProbeFile = do
+      exists <- doesFileExist probeFile
+      when exists $ removeFile probeFile
+
+    probe path = do
       result <- tryShellEchoing echoing path ["-v", "-o", probeFile, "--", "true", "2>/dev/null"]
       case result of
         Left SomeException{} -> unavailable "'time' binary does not accept -v/-o"
@@ -272,13 +289,10 @@ probeTimeVerbose env = do
             then unavailable "'time -v' produced no report file"
             else do
               report <- BSC.unpack <$> BSC.readFile probeFile
-              removeFile probeFile
               if all (`isInfixOf` report) timeVerboseMarkers
                 then pure (Just path)
                 else unavailable "'time -v' output missing expected fields (not GNU time?)"
-  where
-    echoing   = envEchoing env
-    probeFile = envBeaconDir env </> "temp.time-probe" <.> beaconProcessID
+
     unavailable reason = do
       printStyled StyleWarning $
            "'time -v' unavailable (" ++ reason ++ "); "
@@ -291,6 +305,27 @@ timeVerboseMarkers =
   , "File system inputs"
   , "File system outputs"
   ]
+
+-- Verifies '--mem-limit' would actually be enforced here: covers both a
+-- missing `systemd-run` (e.g. Darwin) and a present-but-non-delegating
+-- cgroup, by spinning up a throwaway scope and reading its MemoryHigh back
+-- from its own cgroup.
+probeMemLimit :: RunEnvironment -> IO Bool
+probeMemLimit env = do
+  result <- tryShellEchoing echoing "systemd-run"
+    [ "--user", "--scope", "--collect", "--quiet"
+    , "-p", "MemoryHigh=" ++ probeSize
+    , "--", "sh", "-c"
+    , "'cat /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.high'"
+    , "2>/dev/null"
+    ]
+  pure $ case result of
+    Left{}    -> False
+    Right out -> dropWhileEnd isSpace out == show probeSizeBytes
+  where
+    echoing        = envEchoing env
+    probeSize      = "100M"
+    probeSizeBytes = fromJust $ parseSizeBytes probeSize
 
 parseTimeVerboseReport :: String -> Maybe ProcessStats
 parseTimeVerboseReport report =

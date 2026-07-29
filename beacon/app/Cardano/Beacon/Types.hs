@@ -133,6 +133,11 @@ data EnvironmentCapabilities = EnvironmentCapabilities
     -- ^ Whether this db-analyser build supports @--only-immutable-db@.
   , capLsmNoCache      :: Bool
     -- ^ Whether this db-analyser build supports @--lsm-no-cache@.
+  , capMemLimit        :: Bool
+    -- ^ Whether this host's user cgroup actually enforces a memory limit set
+    -- via @systemd-run --user --scope -p MemoryHigh=...@ (as opposed to
+    -- silently accepting but not applying it, e.g. for lack of cgroup v2
+    -- memory-controller delegation).
   , capTimeVerbose     :: Maybe FilePath
     -- ^ Resolved path to a working GNU @time -v@, or 'Nothing' if absent or
     -- non-conforming (e.g. a BSD\/busybox @time@ without @-v@\/@-o@ support).
@@ -187,7 +192,7 @@ normalizeSize s = case span isDigit s of
   (digits, suffix)  -> do
     n <- readMaybe digits
     case map toUpper suffix of
-      ""  -> Just (roundToNearestUnit n)
+      ""  -> uncurry inRange (roundToNearestUnit n)
       "M" -> inRange n "M"
       "G" -> inRange n "G"
       _   -> Nothing
@@ -196,9 +201,10 @@ normalizeSize s = case span isDigit s of
       | n >= 1 && n <= 999 = Just (show (n :: Integer) ++ unit)
       | otherwise          = Nothing
 
+    roundToNearestUnit :: Integer -> (Integer, String)
     roundToNearestUnit bytes
-      | roundedG >= 1 = show roundedG ++ "G"
-      | otherwise     = show (roundDiv bytes mebi) ++ "M"
+      | roundedG >= 1 = (roundedG, "G")
+      | otherwise     = (roundDiv bytes mebi, "M")
       where
         roundedG = roundDiv bytes gibi
         roundDiv n d = (n + d `div` 2) `div` d

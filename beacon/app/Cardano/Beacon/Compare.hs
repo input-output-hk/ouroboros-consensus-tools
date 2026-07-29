@@ -129,7 +129,7 @@ selAllocatedBytes   = Selector "allocatedBytes" (fromIntegral . allocatedBytes) 
 -- Aggregate as a mean/median *of this per-slot ratio*, never as @mean totalTime / mean mut@;
 -- the latter is dominated by whichever run happens to contain the biggest single outlier and
 -- can diverge sharply from the per-slot mean (seen empirically to differ by >50% on real data).
-selTotalOverMut     = Selector "totalTime_per_mut" (\sdp -> fromIntegral (totalTime sdp) / fromIntegral (mut sdp)) "x" False
+selTotalOverMut     = Selector "totalTime_per_mut" (\sdp -> if mut sdp == 0 then 0 else fromIntegral (totalTime sdp) / fromIntegral (mut sdp)) "x" False
 
 -- | Get metric specified by the selector for all slots.
 (.>) ::
