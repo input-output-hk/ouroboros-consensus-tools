@@ -184,7 +184,7 @@ mebi = 1024 * 1024
 gibi = 1024 * 1024 * 1024
 
 -- | Validate and canonicalize a user-supplied @--heap-limit@\/@--mem-limit@
--- size string. The canonical form is always a whole number of at most 3
+-- size string. The canonical form is always a whole number of at most 5
 -- digits followed by \'M\' or \'G\' (uppercase, no decimal point).
 normalizeSize :: String -> Maybe String
 normalizeSize s = case span isDigit s of
@@ -198,8 +198,8 @@ normalizeSize s = case span isDigit s of
       _   -> Nothing
   where
     inRange n unit
-      | n >= 1 && n <= 999 = Just (show (n :: Integer) ++ unit)
-      | otherwise          = Nothing
+      | n >= 1 && n <= 99999 = Just (show (n :: Integer) ++ unit)
+      | otherwise            = Nothing
 
     roundToNearestUnit :: Integer -> (Integer, String)
     roundToNearestUnit bytes
