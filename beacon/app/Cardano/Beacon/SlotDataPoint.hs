@@ -47,6 +47,9 @@ instance FromJSON SlotDataPoint where
     totalTime       :: Int64    <- o .: "totalTime"
     mut             :: Int64    <- o .: "mut"
     gc              :: Int64    <- o .: "gc"
+    -- Absent in runs recorded before these fields existed.
+    tableReadTime   :: Int64    <- o .:? "tableReadTime" .!= 0
+    mut_tableRead   :: Int64    <- o .:? "mut_tableRead" .!= 0
     majGcCount      :: Word32   <- o .: "majGcCount"
     minGcCount      :: Word32   <- o .: "minGcCount"
     allocatedBytes  :: Word64   <- o .: "allocatedBytes"
@@ -85,6 +88,15 @@ data SlotDataPoint =
         -- | Time spent in garbage collection while performing the 5 ledger
         -- operations at 'slot'.
       , gc              :: !Int64
+        -- | Elapsed time spent fetching this block's ledger tables (e.g. the
+        -- on-disk backend's UTxO-table reads) before any of the 5 ledger
+        -- operations even start; not included in 'totalTime'\/'mut'\/'gc'.
+        -- @0@ for runs recorded before this field existed.
+      , tableReadTime   :: !Int64
+        -- | Difference of the GC.mutator_elapsed_ns field while fetching
+        -- this block's ledger tables (see 'tableReadTime'). @0@ for runs
+        -- recorded before this field existed.
+      , mut_tableRead   :: !Int64
         -- | Total number of __major__ garbage collections that took place while
         -- performing the 5 ledger operations at 'slot'.
       , majGcCount      :: !Word32

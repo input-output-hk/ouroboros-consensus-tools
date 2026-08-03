@@ -12,7 +12,9 @@ import qualified Data.ByteString as B (readFile)
 import           Data.Map as Map (Map, empty, lookup, size, toAscList)
 import           Data.Maybe (fromMaybe)
 import qualified Data.Text as T
+import           Data.Word (Word64)
 import           GHC.Generics (Generic)
+import           System.FilePath (isRelative, (</>))
 
 
 data BeaconChain = BeaconChain {
@@ -73,3 +75,48 @@ loadChainsInfo jsonFile =
         , show e
         ]
       pure emptyChains
+
+-- | Resolve a chain's home directory to an absolute\/usable path, exactly as
+-- 'Cardano.Beacon.Run.runDbAnalyser' does when invoking db-analyser.
+resolveChainDir :: FilePath -> FilePath -> FilePath
+resolveChainDir beaconDir chHomeDir
+  | isRelative chHomeDir = beaconDir </> "chain" </> chHomeDir
+  | otherwise            = chHomeDir
+
+-- | The subset of a node's @config.json@ we care about.
+newtype NodeConfig = NodeConfig { ncShelleyGenesisFile :: FilePath }
+
+instance FromJSON NodeConfig where
+  parseJSON = withObject "NodeConfig" $ \o ->
+    NodeConfig <$> o .: "ShelleyGenesisFile"
+
+-- | The subset of a Shelley genesis file we care about.
+newtype ShelleyGenesis = ShelleyGenesis { sgEpochLength :: Word64 }
+
+instance FromJSON ShelleyGenesis where
+  parseJSON = withObject "ShelleyGenesis" $ \o ->
+    ShelleyGenesis <$> o .: "epochLength"
+
+-- | Look up a chain's epoch length (in slots), by following its node config
+-- to the Shelley genesis file it references. All eras that are live on a
+-- beacon-benchmarked chain hard-fork at epoch 0 (see 'chConfigFile'), so the
+-- Shelley epoch length applies from the chain's genesis onwards.
+-- Returns 'Nothing' (with a warning) if the config or genesis file can't be
+-- read/parsed, e.g. for chains registered before epoch length was needed.
+loadEpochLength :: FilePath -> BeaconChain -> IO (Maybe Word64)
+loadEpochLength beaconDir BeaconChain{chHomeDir, chConfigFile} = do
+  mConfig <- decodeFileStrict configPath
+  case mConfig of
+    Nothing -> warn configPath >> pure Nothing
+    Just NodeConfig{ncShelleyGenesisFile} -> do
+      let genesisPath = chainDir </> ncShelleyGenesisFile
+      mGenesis <- decodeFileStrict genesisPath
+      case mGenesis of
+        Nothing                          -> warn genesisPath >> pure Nothing
+        Just ShelleyGenesis{sgEpochLength} -> pure (Just sgEpochLength)
+  where
+    chainDir   = resolveChainDir beaconDir chHomeDir
+    configPath = chainDir </> chConfigFile
+
+    warn path = printStyled StyleWarning $
+      "could not read/parse '" ++ path ++ "' to determine epoch length"

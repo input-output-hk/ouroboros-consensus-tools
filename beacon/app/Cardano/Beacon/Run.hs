@@ -29,7 +29,7 @@ import           Data.List (dropWhileEnd, isInfixOf, isPrefixOf)
 import           Data.Maybe (fromJust, isJust, listToMaybe)
 import           System.Directory (createDirectoryIfMissing, doesFileExist,
                      findExecutable, removeFile)
-import           System.FilePath (isRelative, (<.>), (</>))
+import           System.FilePath ((<.>), (</>))
 import           System.Process hiding (env)
 import           Text.Read (readMaybe)
 
@@ -177,9 +177,7 @@ shellRunDbAnalyser env applMode backend memLimitOpts BeaconChain{..} outFile = d
     tempResult  = envBeaconDir env </> "temp.result"  <.> beaconProcessID <.> "json"
     echoing     = envEchoing env
 
-    chDir
-      | isRelative chHomeDir  = envBeaconDir env </> "chain" </> chHomeDir
-      | otherwise             = chHomeDir
+    chDir = resolveChainDir (envBeaconDir env) chHomeDir
 
     dbAnalyserArgs = filter (not . null)
       [ "--db", chDir </> chDbDir
