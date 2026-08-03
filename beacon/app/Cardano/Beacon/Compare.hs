@@ -1,5 +1,6 @@
 {-# LANGUAGE NamedFieldPuns    #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards   #-}
 
 {-# OPTIONS_GHC -fno-warn-unused-top-binds #-}
 
@@ -32,6 +33,7 @@ import qualified Graphics.Rendering.Chart.Easy as Chart
 import           Numeric
 import           Prelude hiding (putStr, putStrLn)
 import qualified Statistics.Function as Stat
+import qualified Statistics.Quantile as Stat
 import qualified Statistics.Sample as Stat
 
 
@@ -40,7 +42,7 @@ doCompare chains runA_@BeaconRun{rMeta = metaA} mRunB
   | isNothing ch =
       printStyled StyleFatal $ "chain fragment not found: " ++ show (chain metaA)
   | otherwise = case mRunB of
-      Nothing -> summarizeBeaconRun runA selMutBlockApply
+      Nothing -> summarizeOne runA
       Just runB_
         | chain metaA /= chain (rMeta runB_) ->
             printStyled StyleFatal "meaningful comparisons between runs on different chain fragments is currently not supported"
@@ -49,9 +51,10 @@ doCompare chains runA_@BeaconRun{rMeta = metaA} mRunB
           compareMeasurements True runA runB selMutForecast
           compareMeasurements True runA runB selMutBlockApply
           compareMeasurements True runA runB selMutTotalTime
+          compareMeasurements True runA runB selTotalOverMut
 
-          summarizeBeaconRun runA selMutBlockApply
-          summarizeBeaconRun runB selMutBlockApply
+          summarizeOne runA
+          summarizeOne runB
   where
     ch         = lookupChain (chain metaA) chains
     dropUntil  = maybe id (\from -> dropWhile (\SlotDataPoint{slot} -> slot < fromIntegral from)) (ch >>= chFromSlot)
@@ -60,6 +63,20 @@ doCompare chains runA_@BeaconRun{rMeta = metaA} mRunB
 
     postProc run@BeaconRun{rData} =
       run {rData = applySortedDataPoints (takeBlocks . dropUntil) rData}
+
+    summarizeOne run = do
+      printStyled StyleInfo "---------------------------------------------------"
+      summarizeBeaconRun True  run selMutBlockApply
+      putStrLn ""
+      summarizeBeaconRun False run selMutTotalTime
+      putStrLn ""
+      summarizeBeaconRun False run selTotalOverMut
+      putStrLn ""
+      summarizeMajorGcImpact   run selMutTotalTime
+      putStrLn ""
+      printProcessStats        run
+      putStrLn ""
+
 
 doVariance :: [BeaconRun] -> IO ()
 doVariance [] =
@@ -75,6 +92,7 @@ doVariance runs = do
     selectors =
       [ selMutBlockApply
       , selMutTotalTime
+      , selTotalOverMut
       , selAllocatedBytes
       ]
 
@@ -91,14 +109,27 @@ data Selector = Selector {
     selName       :: String
   , selProjection :: SlotDataPoint -> Double
   , selUnit       :: String
+  , selPerTx      :: Bool
+    -- ^ Whether an "avg per tx" figure is meaningful for this metric.
+    -- Time-like metrics scale with tx count; dimensionless ratios (e.g.
+    -- 'selTotalOverMut') do not.
   }
 
-selSlot, selMutForecast, selMutBlockApply, selMutTotalTime, selAllocatedBytes :: Selector
-selSlot             = Selector "slot"           (fromIntegral . unSlotNo . slot)  ""
-selMutForecast      = Selector "mut_forecast"   (fromIntegral . mut_forecast)     "μs"
-selMutBlockApply    = Selector "mut_blockApply" (fromIntegral . mut_blockApply)   "μs"
-selMutTotalTime     = Selector "totalTime"      (fromIntegral . totalTime)        "μs"
-selAllocatedBytes   = Selector "allocatedBytes" (fromIntegral . allocatedBytes)   "B"
+selSlot, selMutForecast, selMutBlockApply, selMutTotalTime, selAllocatedBytes, selTotalOverMut :: Selector
+selSlot             = Selector "slot"           (fromIntegral . unSlotNo . slot)  ""    True
+selMutForecast      = Selector "mut_forecast"   (fromIntegral . mut_forecast)     "μs"  True
+selMutBlockApply    = Selector "mut_blockApply" (fromIntegral . mut_blockApply)   "μs"  True
+selMutTotalTime     = Selector "totalTime"      (fromIntegral . totalTime)        "μs"  True
+selAllocatedBytes   = Selector "allocatedBytes" (fromIntegral . allocatedBytes)   "B"   True
+-- | Wall-clock time relative to mutator time, per slot: how many times
+-- longer 'totalTime' is than 'mut' at that slot. Unlike 'mut'/'mut_blockApply',
+-- this is sensitive to GC pauses and (per real measurement) to I/O
+-- forced by an on-disk backend, since neither shows up in mutator time but
+-- both inflate totalTime.
+-- Aggregate as a mean/median *of this per-slot ratio*, never as @mean totalTime / mean mut@;
+-- the latter is dominated by whichever run happens to contain the biggest single outlier and
+-- can diverge sharply from the per-slot mean (seen empirically to differ by >50% on real data).
+selTotalOverMut     = Selector "totalTime_per_mut" (\sdp -> if mut sdp == 0 then 0 else fromIntegral (totalTime sdp) / fromIntegral (mut sdp)) "x" False
 
 -- | Get metric specified by the selector for all slots.
 (.>) ::
@@ -111,24 +142,20 @@ BeaconRun{ rData } .> Selector{ selProjection } =
 infixl 9 .>
 
 
-summarizeBeaconRun :: BeaconRun -> Selector -> IO ()
-summarizeBeaconRun run sel@(Selector header _ unit)
+-- | Sample aggregation for a summary: All data points whose tx count
+-- matches the run's maximum observed tx count. Guarantees symmetrical
+-- blocks that are comparable to one another.
+-- The 'chFromSlot' filter is assumed to have been applied to the @run@.
+selectMaxTxSample :: BeaconRun -> IO (Maybe (Int, Vector SlotDataPoint))
+selectMaxTxSample run
   | null points = printFatalAndDie $
       "cannot summarize " ++ slug ++ ": run contains no data points"
   | otherwise = case maxTxCount of
-      Nothing -> printStyled StyleWarning $
-        "cannot summarize " ++ slug ++ ": no block's stats parsed as a tx count"
-      Just n -> do
-        printStyled StyleInfo $ "Summary for " ++ header ++ "/" ++ slug
-        putStrLn $ "sample size: " ++ show (V.length sample) ++ " blocks"
-        putStrLn $ "   tx/block: " ++ show n
-        putStrLn $ "       mean: " ++ withUnit mean ++ "   (" ++ withUnit sMin ++ " .. " ++ withUnit sMax ++ ")"
-        putStrLn $ " avg per tx: " ++ if n == 0 then "n/a" else withUnit (mean / fromIntegral n)
-        where
-          runMaxTxOnly  = run {rData = applySortedDataPoints (filter ((== Just n) . sdpTxCount)) (rData run)}
-          sample        = runMaxTxOnly .> sel
-          mean          = Stat.mean sample
-          (sMin, sMax)  = Stat.minMax sample
+      Nothing -> do
+        printStyled StyleWarning $
+          "cannot summarize " ++ slug ++ ": no block's stats parsed as a tx count"
+        pure Nothing
+      Just n -> pure $ Just (n, V.fromList (filter ((== Just n) . sdpTxCount) points))
   where
     slug   = toSlug (rMeta run)
     points = unPoints (rData run)
@@ -137,8 +164,63 @@ summarizeBeaconRun run sel@(Selector header _ unit)
       [] -> Nothing
       cs -> Just (maximum cs)
 
+median :: Vector Double -> Double
+median = Stat.median Stat.medianUnbiased
+
+summarizeBeaconRun :: Bool -> BeaconRun -> Selector -> IO ()
+summarizeBeaconRun withChainInfo run (Selector header selProjection unit perTx) = do
+    mSample <- selectMaxTxSample run
+    forM_ mSample $ \(n, points) -> do
+      let sample       = V.map selProjection points
+          meanV        = Stat.mean sample
+          medianV      = median sample
+          (sMin, sMax) = Stat.minMax sample
+      printStyled StyleInfo $ "Summary for " ++ header ++ "/" ++ toSlug (rMeta run)
+      when withChainInfo $ do
+        putStrLn $ "sample size: " ++ show (V.length points) ++ " blocks"
+        putStrLn $ "   tx/block: " ++ show n
+      putStrLn   $ "       mean: " ++ withUnit meanV ++ "   (" ++ withUnit sMin ++ " .. " ++ withUnit sMax ++ ")"
+      putStrLn   $ "     median: " ++ withUnit medianV
+      when perTx $ do
+        putStrLn $ " avg per tx (mean):   " ++ if n == 0 then "n/a" else withUnit (meanV / fromIntegral n)
+        putStrLn $ " avg per tx (median): " ++ if n == 0 then "n/a" else withUnit (medianV / fromIntegral n)
+  where
     withUnit :: Double -> String
     withUnit d = showFFloat (Just 2) d "" ++ unit
+
+-- | Print a run's process-level stats if any were recorded.
+printProcessStats :: BeaconRun -> IO ()
+printProcessStats run =
+  forM_ (rProcessStats run) $ \ProcessStats{..} -> do
+    printStyled StyleInfo "Process stats"
+    putStrLn $ "      max RSS: " ++ show statsMaxResidentSetSize ++ " B"
+    putStrLn $ " fs blocks in: " ++ show statsFileSystemInputs
+    putStrLn $ "fs blocks out: " ++ show statsFileSystemOutputs
+
+-- | Split a run's sample by whether a major GC occurred during that slot
+-- and summarize the chosen metric on each side.
+-- This is a deliberate alternative to discarding "outlier" slots: the
+-- split is on a causal fact rather than a statistical threshold picked after looking
+-- at the specific run's own distribution.
+summarizeMajorGcImpact :: BeaconRun -> Selector -> IO ()
+summarizeMajorGcImpact run (Selector header selProjection unit _) = do
+    mSample <- selectMaxTxSample run
+    forM_ mSample $ \(_, points) -> do
+      let (affected, steady) = V.partition ((> 0) . majGcCount) points
+      printStyled StyleInfo $ "major GC affected: " ++ show (V.length affected) ++ " / " ++ show (V.length points) ++ " blocks"
+      reportSubset "slots w/o major GC" steady
+      reportSubset "slots w/  major GC" affected
+  where
+    withUnit :: Double -> String
+    withUnit d = showFFloat (Just 2) d "" ++ unit
+
+    reportSubset :: String -> Vector SlotDataPoint -> IO ()
+    reportSubset label points
+      | V.null points = pure ()
+      | otherwise =
+          putStrLn $ "  " ++ header ++ ", " ++ label ++ ":  mean "
+                   ++ withUnit (Stat.mean sample) ++ ", median " ++ withUnit (median sample)
+      where sample = V.map selProjection points
 
 
 -- | Compare two measurements (benchmarks).
@@ -172,7 +254,7 @@ summarizeBeaconRun run sel@(Selector header _ unit)
 -- * Provide a continuation to handle comparison results.
 -- * Make threshold and condition(s) on it configurable.
 compareMeasurements :: Bool -> BeaconRun -> BeaconRun -> Selector -> IO ()
-compareMeasurements emitPlots runA runB selector@(Selector header _ _) = do
+compareMeasurements emitPlots runA runB selector@(Selector header _ _ _) = do
     unless (runA .> selSlot == runB .> selSlot) $
       printFatalAndDie "Slot columns must be the same!"
 

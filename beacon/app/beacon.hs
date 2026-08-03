@@ -193,9 +193,9 @@ sameAndDifferingVersions cmds = partition matchesBaseline cmds
     matchesBaseline cmd = maybe True (\v -> Just v == baseline) (cmdVersion cmd)
 
     cmdVersion :: BeaconCommand -> Maybe Version
-    cmdVersion (BeaconBuild v)         = Just v
-    cmdVersion (BeaconDoRun _ v _ _ _) = Just v
-    cmdVersion _                       = Nothing
+    cmdVersion (BeaconBuild v)           = Just v
+    cmdVersion (BeaconDoRun _ v _ _ _ _) = Just v
+    cmdVersion _                         = Nothing
 
 runCommand :: RunEnvironment -> BeaconCommand -> IO RunEnvironment
 runCommand env BeaconListChains = do
@@ -294,28 +294,31 @@ runCommand env (BeaconBuild ver) = do
   install <- shellNixBuildVersion env ver
   printStyled StyleNone $ "installed binary is: " ++ installExePath install
   printStyled StyleNone $ "build plan is available in: " ++ installPlanPath install
+  pure env { runInstall = Just install }
 
-  pure env {runInstall = Just install}
-
-runCommand env@Env{ runChains = Nothing } cmd@(BeaconDoRun bChain _ _ _ _) = do
+runCommand env@Env{ runChains = Nothing } cmd@(BeaconDoRun bChain _ _ _ _ _) = do
   env' <- runCommand env BeaconLoadChains
   case runChains env' >>= lookupChain bChain of
     Nothing -> printFatalAndDie $ "requested chain " ++ show bChain ++ " is not registered"
     Just{}  -> runCommand env' cmd
-runCommand env@Env{ runInstall = Nothing } cmd@(BeaconDoRun _ ver _ _ _) = do
+runCommand env@Env{ runInstall = Nothing } cmd@(BeaconDoRun _ ver _ _ _ _) = do
   env' <- runCommand env (BeaconBuild ver)
   runCommand env' cmd
-runCommand env@Env{..} (BeaconDoRun bChain ver count apply mBackend) = do
+runCommand env@Env{ runInstall = Just{}, runCapabilities = Nothing } cmd@BeaconDoRun{} = do
+  caps <- detectEnvironmentCapabilities env
+  runCommand env { runCapabilities = Just caps } cmd
+runCommand env@Env{..} (BeaconDoRun bChain ver count apply mBackend memLimitOpts) = do
   printStyled StyleInfo "performing run..."
 
   manifest <- mkManifest $ fromJust runInstall
   date <- getCurrentTime
   let meta = mkMeta date manifest
-  shellRunDbAnalyser env apply backend beaconChain currentData
+  mProcessStats <- shellRunDbAnalyser env apply backend memLimitOpts beaconChain currentData
   encodeFile currentMeta meta
-  shellMergeMetaAndData env currentMeta currentData currentRun
+  forM_ mProcessStats $ encodeFile currentStats
+  shellMergeMetaAndData env currentMeta currentData (currentStats <$ mProcessStats) currentRun
 
-  forM_ [currentMeta, currentData]
+  forM_ ([currentMeta, currentData] ++ [currentStats | Just{} <- [mProcessStats]])
     removeFile
   _ <- runCommand env (BeaconStoreRun currentRun)
 
@@ -323,20 +326,22 @@ runCommand env@Env{..} (BeaconDoRun bChain ver count apply mBackend) = do
   -- to avoid any undesired improvements due to data sharing / caching.
   -- Do not change this to a parallel run strategy.
   if count > 1
-    then runCommand env (BeaconDoRun bChain ver (count - 1) apply mBackend)
-    else pure env{ runInstall = Nothing }
+    then runCommand env (BeaconDoRun bChain ver (count - 1) apply mBackend memLimitOpts)
+    else pure env{ runInstall = Nothing, runCapabilities = Nothing }
   where
     currentData   = envBeaconDir env </> "beacon-slotdata" <.> beaconProcessID <.> "json"
     currentMeta   = envBeaconDir env </> "beacon-metadata" <.> beaconProcessID <.> "json"
+    currentStats  = envBeaconDir env </> "beacon-stats"    <.> beaconProcessID <.> "json"
     currentRun    = envBeaconDir env </> "beacon-result"   <.> beaconProcessID <.> "json"
     beaconChain   = fromJust $ runChains >>= lookupChain bChain
     backend       = fromMaybe V2InMem mBackend
     mkMeta date manifest = BeaconRunMeta {
-        commit  = fromJust runCommit
-      , version = ver
-      , chain   = bChain
-      , nixPath = installNixPath $ fromJust runInstall
-      , host    = optMachineId runOptions
+        commit   = fromJust runCommit
+      , version  = ver
+      , chain    = bChain
+      , nixPath  = installNixPath $ fromJust runInstall
+      , host     = optMachineId runOptions
+      , memLimit = Just memLimitOpts
       , ..
       }
 
@@ -346,7 +351,7 @@ runCommand env (BeaconStoreRun file) = do
     Left err -> printFatalAndDie $
       "doesn't seem to be a beacon run result JSON: " ++ file
       ++ "\n" ++ show err
-    Right (BeaconRun meta _) -> do
+    Right (BeaconRun meta _ _) -> do
       let slugDir = runDir </> toSlug meta
       createDirectoryIfMissing True slugDir
       target <- nextUnusedFilename slugDir
