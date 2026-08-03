@@ -1,6 +1,6 @@
 cabal-version:   3.0
 name:            beacon
-version:         0.3.0.0
+version:         0.3.1.0
 synopsis:        Benchmarking, exploration, and analysis of Consensus.
 description:
   Tool that can be used to compare the performance of two consensus versions, through `ouroboros-consensus:db-analyser`.
