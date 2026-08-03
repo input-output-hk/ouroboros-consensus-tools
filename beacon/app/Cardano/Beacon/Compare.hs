@@ -27,6 +27,7 @@ import qualified Data.Set as Set
 import           Data.Vector (Vector)
 import qualified Data.Vector as V
 import           Data.Vector.Algorithms.Merge (sortBy)
+import           Data.Word (Word64)
 import qualified Graphics.Rendering.Chart.Backend.Cairo as Chart.Cairo
 import           Graphics.Rendering.Chart.Easy ((.=))
 import qualified Graphics.Rendering.Chart.Easy as Chart
@@ -37,8 +38,8 @@ import qualified Statistics.Quantile as Stat
 import qualified Statistics.Sample as Stat
 
 
-doCompare :: Chains -> BeaconRun -> Maybe BeaconRun -> IO ()
-doCompare chains runA_@BeaconRun{rMeta = metaA} mRunB
+doCompare :: FilePath -> Chains -> BeaconRun -> Maybe BeaconRun -> IO ()
+doCompare beaconDir chains runA_@BeaconRun{rMeta = metaA} mRunB
   | isNothing ch =
       printStyled StyleFatal $ "chain fragment not found: " ++ show (chain metaA)
   | otherwise = case mRunB of
@@ -68,12 +69,36 @@ doCompare chains runA_@BeaconRun{rMeta = metaA} mRunB
       printStyled StyleInfo "---------------------------------------------------"
       summarizeBeaconRun True  run selMutBlockApply
       putStrLn ""
+      summarizeBeaconRun False run selMutBlockTick
+      putStrLn ""
+      summarizeBeaconRun False run selMut
+      putStrLn ""
+      summarizeBeaconRun False run selTableReadTime
+      putStrLn ""
+      summarizeBeaconRun False run selMutTableRead
+      putStrLn ""
       summarizeBeaconRun False run selMutTotalTime
+      putStrLn ""
+      summarizeBeaconRun False run selTrueTotalTime
       putStrLn ""
       summarizeBeaconRun False run selTotalOverMut
       putStrLn ""
       summarizeMajorGcImpact   run selMutTotalTime
       putStrLn ""
+      summarizeMajorGcImpact   run selTrueTotalTime
+      putStrLn ""
+      mEpochLength <- maybe (pure Nothing) (loadEpochLength beaconDir) ch
+      forM_ mEpochLength $ \epochLength -> do
+        summarizeEpochBoundaryImpact epochLength run selMutBlockTick
+        putStrLn ""
+        summarizeEpochBoundaryImpact epochLength run selMutTotalTime
+        putStrLn ""
+        summarizeEpochBoundaryImpact epochLength run selTrueTotalTime
+        putStrLn ""
+        summarizeSteadyStateImpact epochLength run selMutTotalTime
+        putStrLn ""
+        summarizeSteadyStateImpact epochLength run selTrueTotalTime
+        putStrLn ""
       printProcessStats        run
       putStrLn ""
 
@@ -115,9 +140,29 @@ data Selector = Selector {
     -- 'selTotalOverMut') do not.
   }
 
-selSlot, selMutForecast, selMutBlockApply, selMutTotalTime, selAllocatedBytes, selTotalOverMut :: Selector
+selSlot, selMut, selMutForecast, selMutBlockTick, selMutBlockApply, selMutTotalTime, selAllocatedBytes, selTotalOverMut, selTableReadTime, selMutTableRead, selTrueTotalTime :: Selector
 selSlot             = Selector "slot"           (fromIntegral . unSlotNo . slot)  ""    True
+selMut              = Selector "mut"            (fromIntegral . mut)              "μs"  True
 selMutForecast      = Selector "mut_forecast"   (fromIntegral . mut_forecast)     "μs"  True
+-- | Elapsed time fetching this block's ledger tables (e.g. the on-disk
+-- backend's UTxO-table reads), timed *before* the window that produces
+-- 'selMutTotalTime'\/'selMut'\/all the other @mut_*@ selectors -- none of
+-- those include this cost. See 'selTrueTotalTime' for the sum.
+selTableReadTime    = Selector "tableReadTime"  (fromIntegral . tableReadTime)    "μs"  True
+-- | Mutator-only companion of 'selTableReadTime' (mirrors 'selMut' vs
+-- 'selMutTotalTime'): comparing the two surfaces GC/blocking time during
+-- the table read that isn't attributed to the mutator.
+selMutTableRead     = Selector "mut_tableRead"  (fromIntegral . mut_tableRead)    "μs"  True
+-- | 'selMutTotalTime' plus the table-read time that precedes its window --
+-- the true, complete per-block wall-clock cost, including UTxO-table I/O.
+selTrueTotalTime    = Selector "trueTotalTime"  (\sdp -> fromIntegral (totalTime sdp + tableReadTime sdp)) "μs" True
+-- | Time spent ticking the ledger state forward to a block's slot (era
+-- transitions, epoch-boundary reward\/stake-snapshot computation, etc.),
+-- as distinct from applying the block itself ('selMutBlockApply'). This is
+-- the dominant source of 'selMutTotalTime' outliers on chains with sparse
+-- blocks, since it spikes for whichever block is first processed after an
+-- epoch boundary -- see 'summarizeEpochBoundaryImpact'.
+selMutBlockTick     = Selector "mut_blockTick"  (fromIntegral . mut_blockTick)    "μs"  True
 selMutBlockApply    = Selector "mut_blockApply" (fromIntegral . mut_blockApply)   "μs"  True
 selMutTotalTime     = Selector "totalTime"      (fromIntegral . totalTime)        "μs"  True
 selAllocatedBytes   = Selector "allocatedBytes" (fromIntegral . allocatedBytes)   "B"   True
@@ -197,30 +242,89 @@ printProcessStats run =
     putStrLn $ " fs blocks in: " ++ show statsFileSystemInputs
     putStrLn $ "fs blocks out: " ++ show statsFileSystemOutputs
 
+-- | Print the mean\/median of a metric over a labelled subset of a sample,
+-- shared by 'summarizeMajorGcImpact' and 'summarizeEpochBoundaryImpact'.
+-- Silent when the subset is empty (e.g. no major GC occurred at all).
+-- When the selector is a per-tx-meaningful metric, also prints the
+-- mean\/median divided by the sample's (uniform) tx count.
+reportSubset :: Int -> Selector -> String -> Vector SlotDataPoint -> IO ()
+reportSubset txCount (Selector header selProjection unit perTx) label points
+  | V.null points = pure ()
+  | otherwise = do
+      putStrLn $ "  " ++ header ++ ", " ++ label ++ ":  mean "
+               ++ withUnit meanV ++ ", median " ++ withUnit medianV
+      when perTx $
+        putStrLn $ "  " ++ header ++ ", " ++ label ++ " (per tx):  mean "
+                 ++ perTx' meanV ++ ", median " ++ perTx' medianV
+  where
+    sample     = V.map selProjection points
+    meanV      = Stat.mean sample
+    medianV    = median sample
+    withUnit d = showFFloat (Just 2) d "" ++ unit
+    perTx' d = if txCount == 0 then "n/a" else withUnit (d / fromIntegral txCount)
+
 -- | Split a run's sample by whether a major GC occurred during that slot
 -- and summarize the chosen metric on each side.
 -- This is a deliberate alternative to discarding "outlier" slots: the
 -- split is on a causal fact rather than a statistical threshold picked after looking
 -- at the specific run's own distribution.
 summarizeMajorGcImpact :: BeaconRun -> Selector -> IO ()
-summarizeMajorGcImpact run (Selector header selProjection unit _) = do
+summarizeMajorGcImpact run selector = do
     mSample <- selectMaxTxSample run
-    forM_ mSample $ \(_, points) -> do
+    forM_ mSample $ \(n, points) -> do
       let (affected, steady) = V.partition ((> 0) . majGcCount) points
       printStyled StyleInfo $ "major GC affected: " ++ show (V.length affected) ++ " / " ++ show (V.length points) ++ " blocks"
-      reportSubset "slots w/o major GC" steady
-      reportSubset "slots w/  major GC" affected
-  where
-    withUnit :: Double -> String
-    withUnit d = showFFloat (Just 2) d "" ++ unit
+      reportSubset n selector "slots w/o major GC" steady
+      reportSubset n selector "slots w/  major GC" affected
 
-    reportSubset :: String -> Vector SlotDataPoint -> IO ()
-    reportSubset label points
-      | V.null points = pure ()
-      | otherwise =
-          putStrLn $ "  " ++ header ++ ", " ++ label ++ ":  mean "
-                   ++ withUnit (Stat.mean sample) ++ ", median " ++ withUnit (median sample)
-      where sample = V.map selProjection points
+-- | Split a run's sample by whether the ledger tick leading into that slot
+-- crossed at least one epoch boundary (relative to the previous processed
+-- block's slot -- not necessarily an adjacent slot, since blocks are sparse)
+-- and summarize the chosen metric on each side.
+-- Like 'summarizeMajorGcImpact', this splits on a causal fact -- crossing an
+-- epoch boundary triggers real extra ledger work (reward\/stake-snapshot
+-- computation) in 'mut_blockTick' -- rather than a threshold picked from
+-- this run's own distribution.
+summarizeEpochBoundaryImpact :: Word64 -> BeaconRun -> Selector -> IO ()
+summarizeEpochBoundaryImpact epochLength run selector = do
+    mSample <- selectMaxTxSample run
+    forM_ mSample $ \(n, points) -> do
+      let boundarySlots       = epochBoundarySlots epochLength points
+          (affected, steady)  = V.partition ((`Set.member` boundarySlots) . slot) points
+      printStyled StyleInfo $ "epoch boundary crossed: " ++ show (V.length affected) ++ " / " ++ show (V.length points) ++ " blocks"
+      reportSubset n selector "blocks w/o epoch-boundary tick" steady
+      reportSubset n selector "blocks w/  epoch-boundary tick" affected
+
+-- | Summarize the chosen metric over the crossover of 'summarizeMajorGcImpact'
+-- and 'summarizeEpochBoundaryImpact''s two "steady" subsets: blocks affected
+-- by neither known cause of outliers at once. Only this "w/o both" side is
+-- reported -- the "w/ either" side is already covered by the two impact
+-- reports above, and its blocks overlap with theirs, not with each other.
+summarizeSteadyStateImpact :: Word64 -> BeaconRun -> Selector -> IO ()
+summarizeSteadyStateImpact epochLength run selector = do
+    mSample <- selectMaxTxSample run
+    forM_ mSample $ \(n, points) -> do
+      let boundarySlots = epochBoundarySlots epochLength points
+          steady         = V.filter (\p -> majGcCount p == 0 && slot p `Set.notMember` boundarySlots) points
+      printStyled StyleInfo $
+        "neither major GC nor epoch boundary: " ++ show (V.length steady) ++ " / " ++ show (V.length points) ++ " blocks"
+      reportSubset n selector "slots w/o major GC and w/o epoch-boundary tick" steady
+
+-- | Slots (within the given, slot-ascending sample) whose ledger tick
+-- crossed into a different epoch than the previous sample slot. The very
+-- first slot in the sample is never flagged: whether it itself crossed a
+-- boundary depends on data outside the sample, which we don't have.
+epochBoundarySlots :: Word64 -> Vector SlotDataPoint -> Set SlotNo
+epochBoundarySlots epochLength points =
+  Set.fromList
+    [ slot cur
+    | i <- [1 .. V.length points - 1]
+    , let prev = points V.! (i - 1)
+          cur  = points V.! i
+    , epochOf (slot prev) /= epochOf (slot cur)
+    ]
+  where
+    epochOf s = unSlotNo s `div` epochLength
 
 
 -- | Compare two measurements (benchmarks).
