@@ -153,10 +153,12 @@ selMutTableRead     = Selector "mut_tableRead"  (fromIntegral . mut_tableRead)  
 -- epoch boundary -- see 'summarizeEpochBoundaryImpact'.
 selMutBlockTick     = Selector "mut_blockTick"  (fromIntegral . mut_blockTick)    "μs"  True
 selMutBlockApply    = Selector "mut_blockApply" (fromIntegral . mut_blockApply)   "μs"  True
--- | The complete per-block wall-clock cost: the block's own 'totalTime'
--- (the 5 ledger operations, GC pauses included) plus 'selTableReadTime',
--- the ledger-table fetch that precedes and is otherwise excluded from it.
-selTotalTime        = Selector "totalTime"      (\sdp -> fromIntegral (totalTime sdp + tableReadTime sdp)) "μs" True
+-- | The complete per-block wall-clock cost, including the ledger-table
+-- fetch ('selTableReadTime') that precedes the 5 ledger operations:
+-- 'totalTime' already includes it (requires a @db-analyser@ build where
+-- the RTS-stats window for @totalTime@\/@mut@\/@gc@ starts before that
+-- fetch, not just after it).
+selTotalTime        = Selector "totalTime"      (fromIntegral . totalTime)        "μs"  True
 selAllocatedBytes   = Selector "allocatedBytes" (fromIntegral . allocatedBytes)   "B"   True
 -- | Wall-clock time relative to mutator time, per slot: how many times
 -- longer 'selTotalTime' is than 'mut' at that slot. Unlike 'mut'/'mut_blockApply',
@@ -166,7 +168,7 @@ selAllocatedBytes   = Selector "allocatedBytes" (fromIntegral . allocatedBytes) 
 -- Aggregate as a mean/median *of this per-slot ratio*, never as @mean totalTime / mean mut@;
 -- the latter is dominated by whichever run happens to contain the biggest single outlier and
 -- can diverge sharply from the per-slot mean (seen empirically to differ by >50% on real data).
-selTotalOverMut     = Selector "totalTime_per_mut" (\sdp -> if mut sdp == 0 then 0 else (fromIntegral (totalTime sdp) + fromIntegral (tableReadTime sdp)) / fromIntegral (mut sdp)) "x" False
+selTotalOverMut     = Selector "totalTime_per_mut" (\sdp -> if mut sdp == 0 then 0 else fromIntegral (totalTime sdp) / fromIntegral (mut sdp)) "x" False
 
 -- | Get metric specified by the selector for all slots.
 (.>) ::
