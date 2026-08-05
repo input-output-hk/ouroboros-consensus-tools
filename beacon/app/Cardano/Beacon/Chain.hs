@@ -112,7 +112,7 @@ loadEpochLength beaconDir BeaconChain{chHomeDir, chConfigFile} = do
       let genesisPath = chainDir </> ncShelleyGenesisFile
       mGenesis <- decodeFileStrict genesisPath
       case mGenesis of
-        Nothing                          -> warn genesisPath >> pure Nothing
+        Nothing                            -> warn genesisPath >> pure Nothing
         Just ShelleyGenesis{sgEpochLength} -> pure (Just sgEpochLength)
   where
     chainDir   = resolveChainDir beaconDir chHomeDir
