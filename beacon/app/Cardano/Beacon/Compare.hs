@@ -51,7 +51,7 @@ doCompare beaconDir chains runA_@BeaconRun{rMeta = metaA} mRunB
           let runB = postProc runB_
           compareMeasurements True runA runB selMutForecast
           compareMeasurements True runA runB selMutBlockApply
-          compareMeasurements True runA runB selMutTotalTime
+          compareMeasurements True runA runB selTotalTime
           compareMeasurements True runA runB selTotalOverMut
 
           summarizeOne runA
@@ -77,27 +77,19 @@ doCompare beaconDir chains runA_@BeaconRun{rMeta = metaA} mRunB
       putStrLn ""
       summarizeBeaconRun False run selMutTableRead
       putStrLn ""
-      summarizeBeaconRun False run selMutTotalTime
-      putStrLn ""
-      summarizeBeaconRun False run selTrueTotalTime
+      summarizeBeaconRun False run selTotalTime
       putStrLn ""
       summarizeBeaconRun False run selTotalOverMut
       putStrLn ""
-      summarizeMajorGcImpact   run selMutTotalTime
-      putStrLn ""
-      summarizeMajorGcImpact   run selTrueTotalTime
+      summarizeMajorGcImpact   run selTotalTime
       putStrLn ""
       mEpochLength <- maybe (pure Nothing) (loadEpochLength beaconDir) ch
       forM_ mEpochLength $ \epochLength -> do
         summarizeEpochBoundaryImpact epochLength run selMutBlockTick
         putStrLn ""
-        summarizeEpochBoundaryImpact epochLength run selMutTotalTime
+        summarizeEpochBoundaryImpact epochLength run selTotalTime
         putStrLn ""
-        summarizeEpochBoundaryImpact epochLength run selTrueTotalTime
-        putStrLn ""
-        summarizeSteadyStateImpact epochLength run selMutTotalTime
-        putStrLn ""
-        summarizeSteadyStateImpact epochLength run selTrueTotalTime
+        summarizeSteadyStateImpact epochLength run selTotalTime
         putStrLn ""
       printProcessStats        run
       putStrLn ""
@@ -116,7 +108,7 @@ doVariance runs = do
     slug = toSlug $ rMeta $ head runs
     selectors =
       [ selMutBlockApply
-      , selMutTotalTime
+      , selTotalTime
       , selTotalOverMut
       , selAllocatedBytes
       ]
@@ -140,41 +132,41 @@ data Selector = Selector {
     -- 'selTotalOverMut') do not.
   }
 
-selSlot, selMut, selMutForecast, selMutBlockTick, selMutBlockApply, selMutTotalTime, selAllocatedBytes, selTotalOverMut, selTableReadTime, selMutTableRead, selTrueTotalTime :: Selector
+selSlot, selMut, selMutForecast, selMutBlockTick, selMutBlockApply, selTotalTime, selAllocatedBytes, selTotalOverMut, selTableReadTime, selMutTableRead :: Selector
 selSlot             = Selector "slot"           (fromIntegral . unSlotNo . slot)  ""    True
 selMut              = Selector "mut"            (fromIntegral . mut)              "μs"  True
 selMutForecast      = Selector "mut_forecast"   (fromIntegral . mut_forecast)     "μs"  True
 -- | Elapsed time fetching this block's ledger tables (e.g. the on-disk
 -- backend's UTxO-table reads), timed *before* the window that produces
--- 'selMutTotalTime'\/'selMut'\/all the other @mut_*@ selectors -- none of
--- those include this cost. See 'selTrueTotalTime' for the sum.
+-- 'selMut'\/all the other @mut_*@ selectors -- none of those include this
+-- cost. See 'selTotalTime' for the sum.
 selTableReadTime    = Selector "tableReadTime"  (fromIntegral . tableReadTime)    "μs"  True
 -- | Mutator-only companion of 'selTableReadTime' (mirrors 'selMut' vs
--- 'selMutTotalTime'): comparing the two surfaces GC/blocking time during
+-- 'selTotalTime'): comparing the two surfaces GC/blocking time during
 -- the table read that isn't attributed to the mutator.
 selMutTableRead     = Selector "mut_tableRead"  (fromIntegral . mut_tableRead)    "μs"  True
--- | 'selMutTotalTime' plus the table-read time that precedes its window --
--- the true, complete per-block wall-clock cost, including UTxO-table I/O.
-selTrueTotalTime    = Selector "trueTotalTime"  (\sdp -> fromIntegral (totalTime sdp + tableReadTime sdp)) "μs" True
 -- | Time spent ticking the ledger state forward to a block's slot (era
 -- transitions, epoch-boundary reward\/stake-snapshot computation, etc.),
 -- as distinct from applying the block itself ('selMutBlockApply'). This is
--- the dominant source of 'selMutTotalTime' outliers on chains with sparse
+-- a dominant source of 'selTotalTime' outliers on chains with sparse
 -- blocks, since it spikes for whichever block is first processed after an
 -- epoch boundary -- see 'summarizeEpochBoundaryImpact'.
 selMutBlockTick     = Selector "mut_blockTick"  (fromIntegral . mut_blockTick)    "μs"  True
 selMutBlockApply    = Selector "mut_blockApply" (fromIntegral . mut_blockApply)   "μs"  True
-selMutTotalTime     = Selector "totalTime"      (fromIntegral . totalTime)        "μs"  True
+-- | The complete per-block wall-clock cost: the block's own 'totalTime'
+-- (the 5 ledger operations, GC pauses included) plus 'selTableReadTime',
+-- the ledger-table fetch that precedes and is otherwise excluded from it.
+selTotalTime        = Selector "totalTime"      (\sdp -> fromIntegral (totalTime sdp + tableReadTime sdp)) "μs" True
 selAllocatedBytes   = Selector "allocatedBytes" (fromIntegral . allocatedBytes)   "B"   True
 -- | Wall-clock time relative to mutator time, per slot: how many times
--- longer 'totalTime' is than 'mut' at that slot. Unlike 'mut'/'mut_blockApply',
+-- longer 'selTotalTime' is than 'mut' at that slot. Unlike 'mut'/'mut_blockApply',
 -- this is sensitive to GC pauses and (per real measurement) to I/O
 -- forced by an on-disk backend, since neither shows up in mutator time but
--- both inflate totalTime.
+-- both inflate 'selTotalTime'.
 -- Aggregate as a mean/median *of this per-slot ratio*, never as @mean totalTime / mean mut@;
 -- the latter is dominated by whichever run happens to contain the biggest single outlier and
 -- can diverge sharply from the per-slot mean (seen empirically to differ by >50% on real data).
-selTotalOverMut     = Selector "totalTime_per_mut" (\sdp -> if mut sdp == 0 then 0 else fromIntegral (totalTime sdp) / fromIntegral (mut sdp)) "x" False
+selTotalOverMut     = Selector "totalTime_per_mut" (\sdp -> if mut sdp == 0 then 0 else (fromIntegral (totalTime sdp) + fromIntegral (tableReadTime sdp)) / fromIntegral (mut sdp)) "x" False
 
 -- | Get metric specified by the selector for all slots.
 (.>) ::
