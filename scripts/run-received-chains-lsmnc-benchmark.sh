@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Imports an arbitrary number of chain fragments (zipped, one per chain,
 # plus a chain-register.json fragment describing them) received from
-# someone else, merges them into ./beacon-data/chain/, then runs the
-# on-disk LSM/no-page-cache benchmark (no heap limit) against each
-# imported chain and prints its summary.
+# someone else, merges them into ./beacon-data/chain/, then runs both the
+# in-memory and the on-disk LSM/no-page-cache benchmark (no heap limit)
+# against each imported chain and prints their summaries.
 #
 # Requires `beacon`, `jq`, and `unzip` on PATH (the `beacon-import-and-benchmark`
 # flake package wraps this script with all three provided).
@@ -138,23 +138,33 @@ if [[ ${#chain_names[@]} -eq 0 ]]; then
   echo "No chains were imported, nothing to benchmark" >&2; exit 1
 fi
 
-for name in "${chain_names[@]}"; do
+run_and_summarize() {
+  local name="$1" label="$2"
+  shift 2
+  local extra_flags=("$@")
+
   if [[ "$dry_run" -eq 1 ]]; then
-    log "[dry-run] would run: beacon --data-dir $data_dir run --rev $rev -n $name --lsm --lsm-no-cache"
+    log "[dry-run] would run: beacon --data-dir $data_dir run --rev $rev -n $name ${extra_flags[*]}"
     log "[dry-run] would run: beacon --data-dir $data_dir summary <resulting-slug>"
-    continue
+    return
   fi
 
-  log "Running LSM no-cache benchmark (no heap limit) for '$name'"
-  out="$(beacon --data-dir "$data_dir" run --rev "$rev" -n "$name" --lsm --lsm-no-cache 2>&1)"
+  log "Running $label benchmark for '$name'"
+  local out slug
+  out="$(beacon --data-dir "$data_dir" run --rev "$rev" -n "$name" "${extra_flags[@]}" 2>&1)"
   echo "$out" >&2
 
   slug="$(echo "$out" | grep -oE 'run/[^/]+/run-[0-9]+\.json' | sed -E 's#run/([^/]+)/run-.*#\1#' | tail -n1)"
   if [[ -z "$slug" ]]; then
-    echo "Could not determine run slug for '$name' from beacon's output, skipping summary" >&2
-    continue
+    echo "Could not determine run slug for '$name' ($label) from beacon's output, skipping summary" >&2
+    return
   fi
 
   log "Summary for $slug"
   beacon --data-dir "$data_dir" summary "$slug"
+}
+
+for name in "${chain_names[@]}"; do
+  run_and_summarize "$name" "in-memory" --in-mem
+  run_and_summarize "$name" "LSM no-cache (no heap limit)" --lsm --lsm-no-cache
 done
