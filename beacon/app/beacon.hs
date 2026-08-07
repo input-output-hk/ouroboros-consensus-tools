@@ -383,8 +383,8 @@ runCommand env@Env{ runChains = Just chains } (BeaconCompare slugA mSlugB) = do
     mSlugB
 
   case (mSlugB, readA, readB) of
-    (Just{},  Right runA, Right runB) -> doCompare chains runA runB
-    (Nothing, Right runA, _)          -> doCompare chains runA Nothing
+    (Just{},  Right runA, Right runB) -> doCompare (envBeaconDir env) chains runA runB
+    (Nothing, Right runA, _)          -> doCompare (envBeaconDir env) chains runA Nothing
     _                                 -> printFatalAndDie "could not read / parse specified slugs"
 
   pure env
