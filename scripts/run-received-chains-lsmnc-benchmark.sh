@@ -2,8 +2,9 @@
 # Imports an arbitrary number of chain fragments (zipped, one per chain,
 # plus a chain-register.json fragment describing them) received from
 # someone else, merges them into ./beacon-data/chain/, then runs both the
-# in-memory and the on-disk LSM/no-page-cache benchmark (no heap limit)
-# against each imported chain and prints their summaries.
+# in-memory and the on-disk LSM/no-page-cache benchmark (no heap limit),
+# in both apply and reapply mode by default, against each imported chain
+# and prints their summaries.
 #
 # Requires `beacon`, `jq`, and `unzip` on PATH (the `beacon-import-and-benchmark`
 # flake package wraps this script with all three provided).
@@ -22,7 +23,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: run-received-chains-lsmnc-benchmark.sh <input-dir> [--rev REF] [--data-dir DIR] [--dry-run]
+Usage: run-received-chains-lsmnc-benchmark.sh <input-dir> [--rev REF] [--data-dir DIR] [--dry-run] [--apply-only | --reapply-only]
 
   <input-dir>      Directory containing "<chain-name>.zip" archives and a
                     "chain-register.json" fragment for those chains.
@@ -32,6 +33,10 @@ Usage: run-received-chains-lsmnc-benchmark.sh <input-dir> [--rev REF] [--data-di
   --dry-run         Perform the import and chain-register.json merge for
                     real, but only print the beacon commands instead of
                     executing them.
+  --apply-only      Only run the apply (full validation) benchmarks.
+  --reapply-only    Only run the reapply (trusted re-application) benchmarks.
+                    Mutually exclusive with --apply-only. By default both
+                    apply and reapply are run.
   -h, --help        Show this help
 EOF
 }
@@ -40,12 +45,16 @@ rev="0ebd397d"
 data_dir="./beacon-data"
 input_dir=""
 dry_run=0
+apply_only=0
+reapply_only=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --rev) rev="$2"; shift 2 ;;
     --data-dir) data_dir="$2"; shift 2 ;;
     --dry-run) dry_run=1; shift ;;
+    --apply-only) apply_only=1; shift ;;
+    --reapply-only) reapply_only=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *)
       if [[ -z "$input_dir" ]]; then
@@ -56,6 +65,17 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$apply_only" -eq 1 && "$reapply_only" -eq 1 ]]; then
+  echo "--apply-only and --reapply-only are mutually exclusive" >&2; exit 1
+fi
+
+modes=(apply reapply)
+if [[ "$apply_only" -eq 1 ]]; then
+  modes=(apply)
+elif [[ "$reapply_only" -eq 1 ]]; then
+  modes=(reapply)
+fi
 
 if [[ -z "$input_dir" ]]; then
   echo "Missing <input-dir>" >&2; usage; exit 1
@@ -165,6 +185,13 @@ run_and_summarize() {
 }
 
 for name in "${chain_names[@]}"; do
-  run_and_summarize "$name" "in-memory" --in-mem
-  run_and_summarize "$name" "LSM no-cache (no heap limit)" --lsm --lsm-no-cache
+  for mode in "${modes[@]}"; do
+    mode_flags=()
+    if [[ "$mode" == "reapply" ]]; then
+      mode_flags=(--reapply)
+    fi
+
+    run_and_summarize "$name" "in-memory ($mode)" --in-mem "${mode_flags[@]}"
+    run_and_summarize "$name" "LSM no-cache ($mode, no heap limit)" --lsm --lsm-no-cache "${mode_flags[@]}"
+  done
 done
