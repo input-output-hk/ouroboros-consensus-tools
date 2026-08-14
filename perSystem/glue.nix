@@ -73,9 +73,12 @@
     consensusProject =
       consensus.legacyPackages.${system}.hsPkgs.ouroboros-consensus.project;
 
+    # db-analyser lives in the `ouroboros-consensus` package, not in an
+    # `ouroboros-consensus-cardano` one -- that package does not exist at this
+    # pin, which is also why the run manifest lists only ouroboros-consensus.
     dbAnalyserStatic =
       consensusProject.projectVariants.noAsserts.projectCross.musl64
-      .hsPkgs.ouroboros-consensus-cardano.components.exes.db-analyser;
+      .hsPkgs.ouroboros-consensus.components.exes.db-analyser;
 
     beaconStatic =
       beaconProject.projectCross.musl64.hsPkgs.beacon.components.exes.beacon;
