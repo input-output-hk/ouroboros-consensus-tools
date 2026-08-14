@@ -87,7 +87,8 @@ import qualified Paths_beacon as Paths (version)
 import           System.Directory
 import           System.Environment (getExecutablePath)
 import           System.FilePath
-import           System.IO (hClose, hPutStr)
+import           System.IO (hClose, hPutStr, hSetEncoding, stderr,
+                     stdout, utf8)
 import           System.IO.Error (isAlreadyExistsError, isDoesNotExistError)
 import           System.Posix.Files (stdFileMode)
 import           System.Posix.IO (OpenFileFlags (creat, exclusive),
@@ -103,6 +104,15 @@ import           Validation (Validation (..))
 
 main :: IO ()
 main = do
+  -- Without this, beacon dies on its own banner in any environment that has
+  -- no locale set -- cron, a systemd unit, a container, `env -i`. GHC then
+  -- picks ASCII for stdout and the box-drawing characters in 'appHeader'
+  -- raise "commitBuffer: invalid argument (cannot encode character)".
+  -- A distributable is run in exactly those environments, so the encoding
+  -- cannot be left to the host.
+  hSetEncoding stdout utf8
+  hSetEncoding stderr utf8
+
   putStrLn appHeader
   (options, commands) <- getOpts
 
