@@ -71,10 +71,11 @@
     # out static without further -optl flags. CI asserts that rather than
     # trusting it.
     consensusProject =
-      consensus.legacyPackages.${system}.hsPkgs.projectVariants.noAsserts;
+      consensus.legacyPackages.${system}.hsPkgs.ouroboros-consensus.project;
 
     dbAnalyserStatic =
-      consensusProject.projectCross.musl64.hsPkgs.ouroboros-consensus-cardano.components.exes.db-analyser;
+      consensusProject.projectVariants.noAsserts.projectCross.musl64
+      .hsPkgs.ouroboros-consensus-cardano.components.exes.db-analyser;
 
     beaconStatic =
       beaconProject.projectCross.musl64.hsPkgs.beacon.components.exes.beacon;
@@ -244,20 +245,25 @@
     };
 
     inherit (import ../nix/relocate.nix {inherit pkgs lib;}) mkRelocatable;
-  in
-    lib.optionalAttrs available {
-      packages.glue-payload = payload;
-      packages.db-analyser = dbAnalyser;
+  in {
+    # NB: one `packages` attrset, merged before assignment. Two attrsets
+    # combined with `//` would have the static side replace the whole
+    # `packages` key rather than adding to it.
+    packages =
+      lib.optionalAttrs available {
+        glue-payload = payload;
+        db-analyser = dbAnalyser;
 
-      # The payload with every /nix/store library reference rewritten to be
-      # relative to the binaries themselves, so the tree can be copied to a
-      # machine that has no store. Darwin only; Linux uses the static flavour
-      # instead, which needs no rewriting.
-      packages.glue-relocatable = mkRelocatable payload;
-    }
-    // lib.optionalAttrs staticAvailable {
-      packages.glue-payload-static = payloadStatic;
-      packages.db-analyser-static = dbAnalyserStatic;
-      packages.beacon-static = beaconStatic;
-    };
+        # The payload with every /nix/store library reference rewritten to be
+        # relative to the binaries themselves, so the tree can be copied to a
+        # machine that has no store. Darwin only; Linux uses the static
+        # flavour instead, which needs no rewriting.
+        glue-relocatable = mkRelocatable payload;
+      }
+      // lib.optionalAttrs staticAvailable {
+        glue-payload-static = payloadStatic;
+        db-analyser-static = dbAnalyserStatic;
+        beacon-static = beaconStatic;
+      };
+  };
 }

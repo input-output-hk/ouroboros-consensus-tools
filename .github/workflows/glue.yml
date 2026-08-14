@@ -214,6 +214,33 @@ jobs:
 
       # Evaluation is fast and fails fast. Separating it means a wrong
       # attribute path is reported in seconds instead of after a long build.
+      # Temporary: haskell.nix's project layout for cross-compilation is not
+      # something we can evaluate from a darwin workstation (it needs IFD for
+      # x86_64-linux), so this prints the structure rather than guessing at it.
+      # Remove once the musl attribute path is settled.
+      - name: Probe consensus project structure
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          rev=$(nix run nixpkgs#jq -- -r '.nodes["ouroboros-consensus"].locked.rev' flake.lock)
+          echo "consensus rev: $rev"
+          cat > /tmp/probe.nix <<NIXEOF
+          let
+            f = builtins.getFlake "github:IntersectMBO/ouroboros-consensus/$rev";
+            p = f.legacyPackages.x86_64-linux.hsPkgs.ouroboros-consensus.project;
+            try = e: let r = builtins.tryEval e; in if r.success then r.value else ["<unavailable>"];
+            interesting = builtins.filter (n: builtins.match ".*(ouroboros|beacon).*" n != null);
+          in {
+            project = try (builtins.attrNames p);
+            variants = try (builtins.attrNames p.projectVariants);
+            cross = try (builtins.attrNames p.projectCross);
+            crossPkgs = try (interesting (builtins.attrNames p.projectCross.musl64.hsPkgs));
+            noAssertsCrossPkgs =
+              try (interesting (builtins.attrNames p.projectVariants.noAsserts.projectCross.musl64.hsPkgs));
+          }
+          NIXEOF
+          nix eval --impure --json --file /tmp/probe.nix | nix run nixpkgs#jq -- .
+
       - name: Evaluate static payload
         run: nix eval --raw .#glue-payload-static.drvPath
 
