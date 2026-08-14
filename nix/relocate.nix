@@ -123,12 +123,15 @@ in {
       ''
       else
         throw ''
-          Linux relocation is not implemented yet.
+          Linux relocation is not implemented, and is not planned.
 
           It is not a port of the Darwin path: on ELF the interpreter (PT_INTERP)
-          is an absolute path that does NOT expand $ORIGIN, so the loader cannot
-          be found relative to the binary the way libraries can. That forces a
-          strategy choice -- see the notes in this file's commit message.
+          is an absolute path that does NOT expand $ORIGIN, so unlike libraries
+          the loader cannot be found relative to the binary once the tree moves.
+
+          Rather than work around that, Linux uses the statically linked musl
+          flavour -- packages.glue-payload-static -- which has no interpreter
+          and no shared libraries to relocate in the first place.
         ''
     );
 }

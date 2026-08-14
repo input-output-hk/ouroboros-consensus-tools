@@ -8,6 +8,16 @@
   # data and the ability to run with no nix and no network. So this file adds
   # no orchestration -- it only assembles, and bakes in the facts beacon would
   # otherwise curl or probe for.
+  #
+  # Two flavours are produced:
+  #
+  #   glue-payload         dynamically linked; needs nix/relocate.nix to leave
+  #                        the build machine (implemented for darwin only)
+  #   glue-payload-static  linked against musl with no shared libraries at all,
+  #                        so relocation is a copy. This is the Linux answer:
+  #                        on ELF, PT_INTERP is absolute and does not expand
+  #                        $ORIGIN, so a dynamically linked tree cannot find
+  #                        its own loader after being moved.
   perSystem = {
     hsPkgs,
     pkgs,
@@ -29,6 +39,11 @@
     consensusSystems = builtins.attrNames consensus.hydraJobs;
     available = builtins.elem system consensusSystems;
 
+    # musl cross is only wired up for x86_64 so far. aarch64-linux needs
+    # pkgsCross.aarch64-multiplatform-musl and a consensus that builds there
+    # at all; see above.
+    staticAvailable = available && system == "x86_64-linux";
+
     # Precisely what IOG's Hydra builds and cache.iog.io serves. `exesNoAsserts`
     # is not incidental: assertions sit on the measured path and would skew
     # every timing we publish.
@@ -38,11 +53,31 @@
     # Plotting off: Chart-cairo would otherwise drag cairo, glib, fontconfig,
     # freetype, pixman and X11 into a distributable that never draws a plot,
     # and stands in the way of linking it statically for Linux.
-    beacon =
-      (hsPkgs.beacon.project.appendModule {
-        modules = [{packages.beacon.flags.plots = false;}];
-      })
-      .hsPkgs.beacon.components.exes.beacon;
+    beaconProject = hsPkgs.beacon.project.appendModule {
+      modules = [{packages.beacon.flags.plots = false;}];
+    };
+
+    beacon = beaconProject.hsPkgs.beacon.components.exes.beacon;
+
+    # -- static (musl) flavour -------------------------------------------
+    #
+    # Nothing here is cached: consensus's CI cross-compiles only to ucrt64
+    # (Windows), so cache.iog.io has no musl db-analyser and this is a
+    # from-source build of consensus and its whole dependency tree. That cost
+    # is the price of a Linux artifact that can actually be copied to an SPO's
+    # machine, and it is paid once per pin rather than per user.
+    #
+    # haskell.nix's musl cross disables shared libraries, so executables come
+    # out static without further -optl flags. CI asserts that rather than
+    # trusting it.
+    consensusProject =
+      consensus.legacyPackages.${system}.hsPkgs.projectVariants.noAsserts;
+
+    dbAnalyserStatic =
+      consensusProject.projectCross.musl64.hsPkgs.ouroboros-consensus-cardano.components.exes.db-analyser;
+
+    beaconStatic =
+      beaconProject.projectCross.musl64.hsPkgs.beacon.components.exes.beacon;
 
     # The cabal build plan db-analyser was built from. beacon reads
     # `<installPlanPath>/plan.json` to record which ouroboros-consensus /
@@ -53,6 +88,10 @@
     # `legacyPackages` rather than a hydraJobs path on purpose: consensus's CI
     # skips the `build` jobs off Linux, but legacyPackages exposes the same
     # project -- and thus the same shared, project-wide plan -- everywhere.
+    #
+    # The native plan is used for both flavours: cross-compiling to musl does
+    # not change the versions of the packages named in the manifest, which is
+    # all beacon reads out of it.
     planNix =
       consensus.legacyPackages.${system}.hsPkgs.ouroboros-consensus.project.plan-nix;
 
@@ -82,38 +121,39 @@
     # than re-probing on every SPO's machine.
     #
     # Note as of the current pin: --lmdb and --only-immutable-db are *gone*
-    # from db-analyser. This file failing loudly is preferable to discovering
-    # that mid-benchmark.
-    capabilities = pkgs.runCommand "db-analyser-capabilities" {} ''
-      help="$(${dbAnalyser}/bin/db-analyser --help 2>&1 || true)"
-      has() {
-        if echo "$help" | grep -qw -- "$1"; then echo true; else echo false; fi
-      }
-
-      mkdir -p $out
-      cat > $out/capabilities.json <<EOF
-      {
-        "onlyImmutableDb":    $(has --only-immutable-db),
-        "lsmNoCache":         $(has --lsm-no-cache),
-        "benchmarkLedgerOps": $(has --benchmark-ledger-ops),
-        "reapply":            $(has --reapply),
-        "backends": {
-          "inMem": $(has --in-mem),
-          "lsm":   $(has --lsm),
-          "lmdb":  $(has --lmdb)
+    # from db-analyser. This failing loudly is preferable to discovering that
+    # mid-benchmark.
+    mkCapabilities = analyzer:
+      pkgs.runCommand "db-analyser-capabilities" {} ''
+        help="$(${analyzer}/bin/db-analyser --help 2>&1 || true)"
+        has() {
+          if echo "$help" | grep -qw -- "$1"; then echo true; else echo false; fi
         }
-      }
-      EOF
-    '';
+
+        mkdir -p $out
+        cat > $out/capabilities.json <<EOF
+        {
+          "onlyImmutableDb":    $(has --only-immutable-db),
+          "lsmNoCache":         $(has --lsm-no-cache),
+          "benchmarkLedgerOps": $(has --benchmark-ledger-ops),
+          "reapply":            $(has --reapply),
+          "backends": {
+            "inMem": $(has --in-mem),
+            "lsm":   $(has --lsm),
+            "lmdb":  $(has --lmdb)
+          }
+        }
+        EOF
+      '';
 
     # Everything beacon would otherwise reach the network for. `beacon run`
-    # today resolves db-analyser via `nix build github:IntersectMBO/...`
+    # resolves db-analyser via `nix build github:IntersectMBO/...`
     # (shellNixBuildVersion) and its commit metadata via the GitHub API
     # (BeaconLoadCommit). Both are build-time facts; a distributed binary has
     # neither nix nor a network, so they are frozen here instead.
-    provenance = {
+    mkProvenance = static: {
       payloadVersion = 1;
-      inherit system;
+      inherit system static;
       analyzer = {
         name = "db-analyser";
         # Named to match beacon's CommitInfo fields, so the baked value drops
@@ -144,36 +184,65 @@
       };
     };
 
-    provenanceFile = pkgs.writeText "provenance.json" (builtins.toJSON provenance);
+    mkPayload = {
+      pname,
+      beaconExe,
+      analyzerExe,
+      jq,
+      time,
+      static,
+    }: let
+      provenanceFile =
+        pkgs.writeText "provenance.json" (builtins.toJSON (mkProvenance static));
+      capabilities = mkCapabilities analyzerExe;
+    in
+      pkgs.stdenvNoCC.mkDerivation {
+        inherit pname;
+        version = "0.1.0";
+        dontUnpack = true;
 
-    payload = pkgs.stdenvNoCC.mkDerivation {
+        installPhase = ''
+          mkdir -p $out/bin $out/share
+
+          install -m755 ${beaconExe}/bin/beacon          $out/bin/beacon
+          install -m755 ${analyzerExe}/bin/db-analyser   $out/bin/db-analyser
+
+          # `jq` reshapes db-analyser's JSON-lines output; GNU `time` supplies
+          # the peak-RSS and block-I/O figures. Bundling GNU time in particular
+          # avoids relying on the host's -- macOS and busybox ship a `time`
+          # with no -v/-o, which silently costs the run its memory metrics.
+          install -m755 ${jq}/bin/jq                     $out/bin/jq
+          install -m755 ${time}/bin/time                 $out/bin/time
+
+          cp ${provenanceFile}                 $out/share/provenance.json
+          cp ${capabilities}/capabilities.json $out/share/capabilities.json
+          cp ${../data/chain-manifest.json}    $out/share/chain-manifest.json
+          cp ${planNix}/plan.json              $out/share/plan.json
+        '';
+
+        passthru = {
+          inherit capabilities static;
+          provenance = mkProvenance static;
+        };
+        meta.mainProgram = "beacon";
+      };
+
+    payload = mkPayload {
       pname = "glue-payload";
-      version = "0.1.0";
-      dontUnpack = true;
-
-      installPhase = ''
-        mkdir -p $out/bin $out/share
-
-        install -m755 ${beacon}/bin/beacon           $out/bin/beacon
-        install -m755 ${dbAnalyser}/bin/db-analyser  $out/bin/db-analyser
-
-        # `jq` reshapes db-analyser's JSON-lines output; GNU `time` supplies the
-        # peak-RSS and block-I/O figures. Both are tiny (1.0 and 0.1 MiB closures)
-        # next to the payload's ~476 MiB, and bundling GNU time in particular
-        # avoids relying on the host's -- macOS and busybox ship a `time` with
-        # no -v/-o, which silently costs the run its memory metrics.
-        install -m755 ${pkgs.jq}/bin/jq              $out/bin/jq
-        install -m755 ${pkgs.time}/bin/time          $out/bin/time
-
-        cp ${provenanceFile}                 $out/share/provenance.json
-        cp ${capabilities}/capabilities.json $out/share/capabilities.json
-        cp ${../data/chain-manifest.json}    $out/share/chain-manifest.json
-        cp ${planNix}/plan.json              $out/share/plan.json
-      '';
-
-      passthru = {inherit provenance dbAnalyser capabilities;};
-      meta.mainProgram = "beacon";
+      beaconExe = beacon;
+      analyzerExe = dbAnalyser;
+      inherit (pkgs) jq time;
+      static = false;
     };
+
+    payloadStatic = mkPayload {
+      pname = "glue-payload-static";
+      beaconExe = beaconStatic;
+      analyzerExe = dbAnalyserStatic;
+      inherit (pkgs.pkgsStatic) jq time;
+      static = true;
+    };
+
     inherit (import ../nix/relocate.nix {inherit pkgs lib;}) mkRelocatable;
   in
     lib.optionalAttrs available {
@@ -182,7 +251,13 @@
 
       # The payload with every /nix/store library reference rewritten to be
       # relative to the binaries themselves, so the tree can be copied to a
-      # machine that has no store. This is what gets archived for SPOs.
+      # machine that has no store. Darwin only; Linux uses the static flavour
+      # instead, which needs no rewriting.
       packages.glue-relocatable = mkRelocatable payload;
+    }
+    // lib.optionalAttrs staticAvailable {
+      packages.glue-payload-static = payloadStatic;
+      packages.db-analyser-static = dbAnalyserStatic;
+      packages.beacon-static = beaconStatic;
     };
 }

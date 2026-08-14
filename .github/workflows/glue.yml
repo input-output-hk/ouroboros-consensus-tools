@@ -176,3 +176,78 @@ jobs:
         run: |
           echo "aarch64-linux has no db-analyser upstream yet; see ouroboros-leios#1048"
           nix build .#glue-payload --no-link --print-build-logs
+
+  # The Linux answer to relocation: a musl-linked payload with no interpreter
+  # and no shared libraries, so moving it to an SPO's machine is a copy.
+  #
+  # Nothing here is cached -- consensus's CI cross-compiles only to ucrt64, so
+  # cache.iog.io has no musl db-analyser and this builds consensus and its whole
+  # dependency tree from source. Hence its own job, and continue-on-error until
+  # it is reliable: it must not gate ordinary PRs while being iterated on.
+  #
+  # TODO: add a binary cache (cachix) so this cost is paid once rather than per
+  # run, then drop continue-on-error and fold it into the matrix above.
+  static:
+    name: Static musl payload (x86_64-linux)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 350
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo rm -rf /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      - name: Install nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://cache.iog.io
+            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
+            allow-import-from-derivation = true
+
+      # Evaluation is fast and fails fast. Separating it means a wrong
+      # attribute path is reported in seconds instead of after a long build.
+      - name: Evaluate static payload
+        run: nix eval --raw .#glue-payload-static.drvPath
+
+      - name: Build static payload
+        run: nix build .#glue-payload-static --print-build-logs -o /tmp/glue-static
+
+      # The whole point: no interpreter, no shared libraries, no store paths.
+      # Asserted rather than assumed, because haskell.nix producing genuinely
+      # static executables from projectCross.musl64 is exactly the thing that
+      # could quietly not be true.
+      - name: Verify the binaries are actually static
+        run: |
+          set -euo pipefail
+          for b in beacon db-analyser jq time; do
+            f=/tmp/glue-static/bin/$b
+            echo "--- $b ---"
+            file -L "$f"
+            if ldd "$f" 2>&1 | grep -qv "not a dynamic executable"; then
+              echo "::error::$b is dynamically linked"
+              ldd "$f" || true
+              exit 1
+            fi
+          done
+
+      - name: Verify it runs after being copied out of the store
+        run: |
+          set -euo pipefail
+          cp -RL /tmp/glue-static /tmp/moved
+          chmod -R u+w /tmp/moved
+          if grep -rIl "/nix/store" /tmp/moved/bin 2>/dev/null | grep .; then
+            echo "::error::store paths remain in the copied payload"
+            exit 1
+          fi
+          mkdir -p /tmp/static-data
+          env -i PATH=/usr/bin:/bin HOME=/tmp \
+            /tmp/moved/bin/beacon --data-dir /tmp/static-data build | tee /tmp/static.log
+          grep -q "using bundled binary" /tmp/static.log
