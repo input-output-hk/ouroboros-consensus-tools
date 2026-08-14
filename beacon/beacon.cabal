@@ -42,9 +42,11 @@ executable beacon
     Cardano.Beacon.Fetch
     Cardano.Beacon.Plot
     Cardano.Beacon.Provenance
+    Cardano.Beacon.Report
     Cardano.Beacon.Run
     Cardano.Beacon.RunMeta
     Cardano.Beacon.SlotDataPoint
+    Cardano.Beacon.SysInfo
     Cardano.Beacon.Types
     Paths_beacon
 
