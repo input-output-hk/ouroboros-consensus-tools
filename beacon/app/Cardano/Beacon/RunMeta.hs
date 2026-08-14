@@ -58,7 +58,23 @@ instance FromJSON BeaconRun where
       <*> o .:? "processStats"
 
 toSlug :: BeaconRunMeta -> String
-toSlug BeaconRunMeta{..} =
+toSlug BeaconRunMeta{..} = mkSlug commit version chain apply backend memLimit
+
+-- | The slug a run /would/ be stored under, from the parameters alone.
+--
+-- Callers that schedule runs (see "Cardano.Beacon.Benchmark") need to name
+-- their results before those results exist, and every field the slug is
+-- derived from is known up front. 'toSlug' is this function applied to a
+-- finished run's metadata, so the two cannot drift apart.
+mkSlug ::
+     CommitInfo
+  -> Version
+  -> ChainName
+  -> ApplyMode
+  -> Backend
+  -> Maybe MemLimitOpts
+  -> String
+mkSlug commit version chain apply backend memLimit =
   intercalate "-" $ filter (not . null)
     [ commitShort    commit
     , verCompiler    version

@@ -58,6 +58,7 @@ module Main (main) where
 
 import           Cabal.Plan (PkgId (..), PkgName (..), PlanJson (..), Unit (..),
                      decodePlanJson)
+import           Cardano.Beacon.Benchmark
 import           Cardano.Beacon.Chain
 import           Cardano.Beacon.CLI
 import           Cardano.Beacon.Compare
@@ -69,13 +70,14 @@ import           Cardano.Beacon.Types
 import           Control.Concurrent (threadDelay)
 import           Control.Exception (SomeException, bracket_, catchJust,
                      displayException, try)
-import           Control.Monad (foldM_, forM_, unless, when)
+import           Control.Monad (foldM, foldM_, forM_, unless, when)
 import           Control.Monad.Extra (ifM)
 import           Data.Aeson (eitherDecodeFileStrict, eitherDecodeStrict',
                      encodeFile)
 import           Data.Either (fromRight, rights)
 import           Data.List (intercalate, isPrefixOf, partition, sort, sortOn)
 import qualified Data.Map as Map
+import qualified Data.Text as T
 import           Data.Maybe (fromJust, fromMaybe, listToMaybe, mapMaybe)
 import           Data.Monoid
 import           Data.Ord (Down (..))
@@ -127,10 +129,17 @@ main = do
 
   commands' <- traverse (resolveVersion provenance) commands
 
+  when (any isBenchmark commands') $
+    createDirectoryIfMissing True (optBeaconDir options </> "chain")
+
   ifM (doesDirectoryExist $ optBeaconDir options)
     (runCommands env commands')
     (printFatalAndDie $ "beacon data directory missing: " ++ optBeaconDir options)
 
+
+isBenchmark :: BeaconCommand -> Bool
+isBenchmark BeaconBenchmark{} = True
+isBenchmark _                 = False
 
 -- | Fill in a 'Version' the user did not fully specify.
 --
@@ -146,6 +155,7 @@ resolveVersion :: Maybe Provenance -> BeaconCommand -> IO BeaconCommand
 resolveVersion mProv = \case
     BeaconBuild ver              -> BeaconBuild <$> fill ver
     BeaconDoRun c ver n a b m    -> (\v -> BeaconDoRun c v n a b m) <$> fill ver
+    BeaconBenchmark c ver n      -> (\v -> BeaconBenchmark c v n) <$> fill ver
     cmd                          -> pure cmd
   where
     fill ver = do
@@ -386,6 +396,66 @@ runCommand env (BeaconBuild ver) = do
   printStyled StyleNone $ "installed binary is: " ++ installExePath install
   printStyled StyleNone $ "build plan is available in: " ++ installPlanPath install
   pure env { runInstall = Just install }
+
+-- The SPO-facing entry point. Expands into the same runs a developer would
+-- have typed, then summarizes each. Needs an install and capabilities first,
+-- so it leans on the existing BeaconBuild path rather than duplicating it.
+runCommand env@Env{ runInstall = Nothing } cmd@BeaconBenchmark{} = do
+  let BeaconBenchmark _ ver _ = cmd
+  env' <- runCommand env (BeaconBuild ver)
+  runCommand env' cmd
+runCommand env@Env{ runInstall = Just{}, runCapabilities = Nothing } cmd@BeaconBenchmark{} = do
+  caps <- detectEnvironmentCapabilities env
+  runCommand env { runCapabilities = Just caps } cmd
+runCommand env@Env{ runChains = Nothing } cmd@BeaconBenchmark{} = do
+  env' <- runCommand env BeaconLoadChains
+  runCommand env' cmd
+runCommand env@Env{..} (BeaconBenchmark mChain ver count) = do
+  chains <- maybe (printFatalAndDie "no chains registered") pure runChains
+
+  chain <- case mChain of
+    Just name
+      | Nothing <- lookupChain name chains ->
+          printFatalAndDie $ "requested chain " ++ show name ++ " is not registered"
+      | otherwise -> pure name
+    -- With exactly one registered chain there is nothing to choose; asking
+    -- an SPO to name it would be ceremony.
+    Nothing -> case Map.keys (unChains chains) of
+      [only] -> do
+        printStyled StyleInfo $ "benchmarking the only registered chain: " ++ show only
+        pure only
+      []     -> printFatalAndDie
+        "no chains registered: nothing to benchmark"
+      many   -> printFatalAndDie $
+        "several chains are registered; pick one with -n: "
+        ++ intercalate ", " [T.unpack n | ChainName n <- many]
+
+  let caps        = fromJust runCapabilities
+      commit      = fromJust runCommit
+      BenchmarkPlan{bpRuns, bpSkipped} =
+        benchmarkPlan caps commit ver chain count
+
+  forM_ bpSkipped $ \reason ->
+    printStyled StyleWarning $ "skipping " ++ reason
+
+  when (null bpRuns) $
+    printFatalAndDie "no benchmark configurations are supported by this build"
+
+  printStyled StyleInfo $
+    "benchmarking " ++ show chain ++ " in " ++ show (length bpRuns) ++ " configurations"
+
+  env' <- foldM runPlanned env bpRuns
+
+  printStyled StyleInfo "all configurations complete; summaries follow"
+  foldM summarizePlanned env' bpRuns
+  where
+    runPlanned e PlannedRun{prLabel, prCommand} = do
+      printStyled StyleInfo $ "=== " ++ prLabel ++ " ==="
+      runCommand e prCommand
+
+    summarizePlanned e PlannedRun{prLabel, prSlug} = do
+      printStyled StyleInfo $ "=== summary: " ++ prLabel ++ " ==="
+      runCommand e (BeaconSummary prSlug)
 
 runCommand env@Env{ runChains = Nothing } cmd@(BeaconDoRun bChain _ _ _ _ _) = do
   env' <- runCommand env BeaconLoadChains
