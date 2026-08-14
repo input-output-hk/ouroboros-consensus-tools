@@ -65,7 +65,9 @@ import           Cardano.Beacon.Compare
 import           Cardano.Beacon.Console
 import           Cardano.Beacon.Fetch
 import           Cardano.Beacon.Provenance
+import           Cardano.Beacon.Report
 import           Cardano.Beacon.Run
+import           Cardano.Beacon.SysInfo
 import           Cardano.Beacon.RunMeta
 import           Cardano.Beacon.Types
 import           Control.Concurrent (threadDelay)
@@ -143,6 +145,25 @@ main = do
 -- Only distributable builds carry a chain manifest; a development checkout has
 -- none, and its chains are managed by hand as before. Downloading is therefore
 -- something the SPO-facing path does and the developer path never does.
+-- | Say out loud what the disk is, since it decides how to read the numbers.
+describeSystem :: SysInfo -> IO ()
+describeSystem SysInfo{siCpuModel, siCpuCores, siMemTotalKb, siDataDisk} = do
+  printStyled StyleInfo $ "cpu:  " ++ maybe "unknown" id siCpuModel
+    ++ maybe "" (\n -> " (" ++ show n ++ " logical)") siCpuCores
+  printStyled StyleInfo $ "ram:  "
+    ++ maybe "unknown" (\kb -> show (kb `div` 1024 `div` 1024) ++ " GiB") siMemTotalKb
+  case siDataDisk of
+    Nothing -> pure ()
+    Just DiskInfo{diDevice, diModel, diRotational, diFilesystem} -> do
+      printStyled StyleInfo $ "disk: " ++ maybe "unknown" id diDevice
+        ++ maybe "" (" " ++) diModel
+        ++ maybe "" (\fs -> " [" ++ fs ++ "]") diFilesystem
+      case diRotational of
+        Just True -> printStyled StyleWarning
+          "the data directory is on a rotating disk; the on-disk figures will \
+          \not be representative of an SSD-backed node"
+        _ -> pure ()
+
 fetchIfNeeded :: RunEnvironment -> Maybe ChainName -> IO ()
 fetchIfNeeded env mChain =
   case runProvenance env of
@@ -474,7 +495,27 @@ runCommand env@Env{..} (BeaconBenchmark mChain ver count) = do
   env' <- foldM runPlanned env bpRuns
 
   printStyled StyleInfo "all configurations complete; summaries follow"
-  foldM summarizePlanned env' bpRuns
+  env'' <- foldM summarizePlanned env' bpRuns
+
+  -- The measurements are only interpretable alongside the machine that
+  -- produced them; the on-disk configurations in particular mean nothing
+  -- without knowing what the disk is.
+  sysInfo <- collectSysInfo (envBeaconDir env)
+  describeSystem sysInfo
+
+  reportPath <- writeReport
+    (envBeaconDir env)
+    (optMachineId runOptions)
+    ((</> "provenance.json") . provShareDir <$> runProvenance)
+    sysInfo
+    (map prSlug bpRuns)
+
+  printStyled StyleInfo $ "report written to " ++ reportPath
+  printStyled StyleNone $
+    "Send this single file back to the Leios team; it contains the \
+    \measurements, the machine they were taken on, and the exact \
+    \db-analyser build that took them."
+  pure env''
   where
     runPlanned e PlannedRun{prLabel, prCommand} = do
       printStyled StyleInfo $ "=== " ++ prLabel ++ " ==="
