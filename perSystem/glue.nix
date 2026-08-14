@@ -73,11 +73,33 @@
     consensusProject =
       consensus.legacyPackages.${system}.hsPkgs.ouroboros-consensus.project;
 
+    # The LSM backend links liburing (io_uring). The musl package set puts only
+    # a shared build in the default link path, so a fully static link fails:
+    #
+    #   ld: cannot find -luring: No such file or directory
+    #   ld: have you installed the static version of the uring library ?
+    #
+    # Point the linker at a static build of it. Everything else db-analyser
+    # needs -- blst, secp256k1, libsodium -- already links statically.
+    staticLinkModule = {
+      pkgs,
+      lib,
+      ...
+    }:
+      lib.mkIf pkgs.stdenv.hostPlatform.isMusl {
+        packages.ouroboros-consensus.components.exes.db-analyser.configureFlags = [
+          "--ghc-option=-optl=-L${pkgs.pkgsStatic.liburing}/lib"
+        ];
+      };
+
     # db-analyser lives in the `ouroboros-consensus` package, not in an
     # `ouroboros-consensus-cardano` one -- that package does not exist at this
     # pin, which is also why the run manifest lists only ouroboros-consensus.
     dbAnalyserStatic =
-      consensusProject.projectVariants.noAsserts.projectCross.musl64
+      (consensusProject.projectVariants.noAsserts.appendModule {
+        modules = [staticLinkModule];
+      })
+      .projectCross.musl64
       .hsPkgs.ouroboros-consensus.components.exes.db-analyser;
 
     beaconStatic =
