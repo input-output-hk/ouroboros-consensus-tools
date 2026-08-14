@@ -1,0 +1,159 @@
+name: Glue distributable
+
+# Builds the SPO-facing distributable of ouroboros-leios#1048 and smoke-tests
+# it. Separate from ci.yml because that one is a cabal build of beacon for
+# development; this one is nix, and its subject is the artifact we hand to
+# people outside the team.
+#
+# The point of running this on Linux is that the maintainers work on darwin
+# while both *required* target platforms are Linux. Without CI, the Linux
+# payload is only ever built by whoever remembers to.
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+  pull_request:
+  merge_group:
+  push:
+    branches:
+      - main
+
+jobs:
+  payload:
+    name: Payload (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            system: x86_64-linux
+            # ouroboros-consensus's flake declares x86_64-linux, so
+            # db-analyser substitutes from cache.iog.io here.
+            payload: true
+          - runner: ubuntu-24.04-arm
+            system: aarch64-linux
+            # ouroboros-consensus's flake does NOT declare aarch64-linux
+            # (it is commented out in its supportedSystems), so there is no
+            # db-analyser to consume and none in the cache. The payload is
+            # expected to be unavailable until that is resolved -- tracked in
+            # ouroboros-leios#1048. beacon itself still builds and is worth
+            # guarding against regressions.
+            payload: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The nix store plus a db-analyser closure does not comfortably fit
+      # alongside everything GitHub preinstalls.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo rm -rf /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      - name: Install nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://cache.iog.io
+            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
+            allow-import-from-derivation = true
+
+      - name: Check nix formatting
+        run: nix run nixpkgs#alejandra -- --check flake.nix flake nix perSystem
+
+      - name: Build beacon
+        run: nix build .#beacon --no-link --print-build-logs
+
+      # Guards the `plots = false` flavour of Cardano.Beacon.Plot, which the
+      # payload uses and which nothing else compiles. Without this it would
+      # rot unnoticed, since the default flag value is True.
+      # Result symlinks go to /tmp, never into the checkout: an untracked
+      # `result` in the repo makes the git tree dirty, which nix records in
+      # the payload's own provenance as a dirty source revision.
+      - name: Build payload
+        if: matrix.payload
+        run: nix build .#glue-payload --print-build-logs -o /tmp/glue-payload
+
+      - name: Smoke-test payload
+        if: matrix.payload
+        run: |
+          set -euo pipefail
+          test -x /tmp/glue-payload/bin/beacon
+          test -x /tmp/glue-payload/bin/db-analyser
+          test -x /tmp/glue-payload/bin/jq
+          test -x /tmp/glue-payload/bin/time
+          for f in provenance capabilities chain-manifest plan; do
+            test -s "/tmp/glue-payload/share/$f.json"
+          done
+
+          echo "--- provenance ---"
+          cat /tmp/glue-payload/share/provenance.json
+
+          # A payload build must never report itself as built from a dirty
+          # tree: its commit lands in every report an SPO sends back.
+          if grep -q '"dirty"\|-dirty' /tmp/glue-payload/share/provenance.json; then
+            echo "::error::payload provenance records a dirty source tree"
+            exit 1
+          fi
+
+          # The plots flag must actually be off, or the distributable carries
+          # cairo and the X11 client libraries for no reason.
+          if ldd /tmp/glue-payload/bin/beacon | grep -qiE "libcairo|libX11"; then
+            echo "::error::payload beacon is linked against cairo/X11"
+            exit 1
+          fi
+
+      # Proves the payload resolves db-analyser and its commit metadata from
+      # baked provenance instead of `nix build` + the GitHub API. Runs with a
+      # PATH that has no nix on it, which is the whole claim.
+      - name: Verify offline analyzer resolution
+        if: matrix.payload
+        run: |
+          set -euo pipefail
+          sha=$(nix run nixpkgs#jq -- -r .analyzer.ciCommitSHA1 /tmp/glue-payload/share/provenance.json)
+          mkdir -p /tmp/beacon-data
+          env -i PATH=/usr/bin:/bin HOME=/tmp \
+            /tmp/glue-payload/bin/beacon --data-dir /tmp/beacon-data build --rev "$sha" \
+            | tee /tmp/build.log
+          grep -q "using db-analyser pinned in this build" /tmp/build.log
+          grep -q "using bundled binary" /tmp/build.log
+
+      # A payload pinned to one db-analyser must refuse a different --rev
+      # rather than silently benchmark the one it has under the wrong label.
+      - name: Verify mismatched --rev is refused
+        if: matrix.payload
+        run: |
+          set -euo pipefail
+          if env -i PATH=/usr/bin:/bin HOME=/tmp \
+               /tmp/glue-payload/bin/beacon --data-dir /tmp/beacon-data build --rev deadbeef1 \
+               > /tmp/mismatch.log 2>&1; then
+            echo "::error::payload accepted a --rev it cannot honour"
+            cat /tmp/mismatch.log
+            exit 1
+          fi
+          grep -q "pinned db-analyser" /tmp/mismatch.log
+
+      - name: Report payload size
+        if: matrix.payload
+        run: |
+          echo "closure: $(nix path-info -Sh .#glue-payload | awk '{print $NF}')"
+          ls -lh /tmp/glue-payload/bin/
+
+      # Not `continue-on-error` on the whole job: this step is expected to
+      # fail today and its failure is information, not noise. When
+      # aarch64-linux gains a db-analyser this starts passing and the matrix
+      # entry above should flip to `payload: true`.
+      - name: Payload availability (known gap)
+        if: ${{ !matrix.payload }}
+        continue-on-error: true
+        run: |
+          echo "aarch64-linux has no db-analyser upstream yet; see ouroboros-leios#1048"
+          nix build .#glue-payload --no-link --print-build-logs
