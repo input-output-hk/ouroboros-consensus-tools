@@ -23,6 +23,9 @@ data BeaconCommand =
       BeaconListChains
     | BeaconBuild       !Version
     | BeaconDoRun       !ChainName !Version !Int !ApplyMode !(Maybe Backend) !MemLimitOpts
+    -- | The SPO-facing entry point: expands into a set of 'BeaconDoRun's and
+    -- their summaries. See "Cardano.Beacon.Benchmark".
+    | BeaconBenchmark   !(Maybe ChainName) !Version !Int
     | BeaconStoreRun    !FilePath
     | BeaconSummary     !String
     | BeaconCompare     !String !(Maybe String)
@@ -108,6 +111,11 @@ parseCommand =  subparser $ mconcat
       (BeaconCompare <$> parseSlug <*> (Just <$> parseSlug))
   , op "list-chains" "List registered chain fragments that beacon can be run on"
       (pure BeaconListChains)
+  , op "benchmark" "Benchmark this machine and summarize the results"
+      (BeaconBenchmark
+        <$> optional (ChainName . Text.pack <$> parseChainName)
+        <*> parseVersion
+        <*> parseCount)
   , op "run" "Perform a beacon run"
       (BeaconDoRun <$> (ChainName . Text.pack <$> parseChainName) <*> parseVersion <*> parseCount <*> parseApplyMode <*> parseBackend <*> parseMemLimitOpts)
   , op "store" "Store a run, moving the given file"
