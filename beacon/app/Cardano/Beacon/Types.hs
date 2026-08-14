@@ -36,7 +36,7 @@ data EchoCommand =
   deriving (Eq, Show)
 
 newtype ChainName = ChainName Text
-        deriving (Eq, Ord, Show, FromJSON, FromJSONKey, ToJSON)
+        deriving (Eq, Ord, Show, FromJSON, FromJSONKey, ToJSON, ToJSONKey)
           via Text
 
 data CommitInfo = CommitInfo

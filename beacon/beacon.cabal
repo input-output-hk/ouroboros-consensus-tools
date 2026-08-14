@@ -39,6 +39,7 @@ executable beacon
     Cardano.Beacon.CLI
     Cardano.Beacon.Compare
     Cardano.Beacon.Console
+    Cardano.Beacon.Fetch
     Cardano.Beacon.Plot
     Cardano.Beacon.Provenance
     Cardano.Beacon.Run
@@ -67,7 +68,9 @@ executable beacon
     , aeson                 >=2.1.2
     , ansi-terminal
     , base
+    , base16-bytestring
     , bytestring
+    , cryptohash-sha256
     , cabal-plan
     , cardano-slotting
     , containers
