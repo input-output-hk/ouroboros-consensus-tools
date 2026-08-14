@@ -120,6 +120,15 @@ jobs:
           set -euo pipefail
           sha=$(nix run nixpkgs#jq -- -r .analyzer.ciCommitSHA1 /tmp/glue-payload/share/provenance.json)
           mkdir -p /tmp/beacon-data
+
+          # No --rev: a build that bundles db-analyser already knows which one.
+          env -i PATH=/usr/bin:/bin HOME=/tmp \
+            /tmp/glue-payload/bin/beacon --data-dir /tmp/beacon-data build \
+            | tee /tmp/default.log
+          grep -q "$sha" /tmp/default.log
+          grep -q "using bundled binary" /tmp/default.log
+
+          # An explicit, matching --rev must keep working.
           env -i PATH=/usr/bin:/bin HOME=/tmp \
             /tmp/glue-payload/bin/beacon --data-dir /tmp/beacon-data build --rev "$sha" \
             | tee /tmp/build.log
@@ -128,7 +137,7 @@ jobs:
 
       # A payload pinned to one db-analyser must refuse a different --rev
       # rather than silently benchmark the one it has under the wrong label.
-      - name: Verify mismatched --rev is refused
+      - name: Verify mismatched --rev/--ghc are refused
         if: matrix.payload
         run: |
           set -euo pipefail
@@ -140,6 +149,16 @@ jobs:
             exit 1
           fi
           grep -q "pinned db-analyser" /tmp/mismatch.log
+
+          # Same for a compiler this build's db-analyser was not built with.
+          if env -i PATH=/usr/bin:/bin HOME=/tmp \
+               /tmp/glue-payload/bin/beacon --data-dir /tmp/beacon-data build --ghc haskell914 \
+               > /tmp/ghc.log 2>&1; then
+            echo "::error::payload accepted a --ghc it cannot honour"
+            cat /tmp/ghc.log
+            exit 1
+          fi
+          grep -q "was compiled with" /tmp/ghc.log
 
       - name: Report payload size
         if: matrix.payload
