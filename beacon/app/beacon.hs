@@ -62,6 +62,7 @@ import           Cardano.Beacon.Chain
 import           Cardano.Beacon.CLI
 import           Cardano.Beacon.Compare
 import           Cardano.Beacon.Console
+import           Cardano.Beacon.Provenance
 import           Cardano.Beacon.Run
 import           Cardano.Beacon.RunMeta
 import           Cardano.Beacon.Types
@@ -108,7 +109,11 @@ main = do
   hostName <-
     let machId = optMachineId options
     in if null machId then getHostName else pure machId
-  let env = envEmpty options { optMachineId = hostName }
+  -- A payload build ships db-analyser and its metadata alongside us; an
+  -- ordinary checkout does not, and keeps the nix/GitHub path.
+  provenance <- loadPayloadProvenance
+  let env = (envEmpty options { optMachineId = hostName })
+              { runProvenance = provenance }
 
   ifM (doesDirectoryExist $ optBeaconDir options)
     (runCommands env commands)
@@ -229,6 +234,24 @@ runCommand env BeaconLoadChains =
 -- That's way we cache such resolutions locally so repeat runs against
 -- an already-built revision don't need GitHub at all; a mutable ref (branch/tag name)
 -- is always resolved live, since only an immutable SHA is safe to reuse indefinitely.
+-- With a payload, the commit is already known: it was resolved when the
+-- payload was built and frozen into share/provenance.json. Asking GitHub
+-- again would be both pointless and impossible offline.
+runCommand env@Env{ runProvenance = Just prov } (BeaconLoadCommit ref) = do
+  let ci  = provenanceCommitInfo prov
+      sha = ciCommitSHA1 ci
+  -- Refuse rather than silently benchmark something other than what was
+  -- asked for: a payload contains exactly one db-analyser and cannot honour
+  -- a different --rev.
+  unless (null ref || ref `isPrefixOf` sha) $
+    printFatalAndDie $ unlines
+      [ "this build has a pinned db-analyser (" ++ sha ++ "),"
+      , "so it cannot benchmark the requested revision '" ++ ref ++ "'."
+      , "Use a beacon built from a checkout to target arbitrary revisions."
+      ]
+  printStyled StyleInfo $ "using db-analyser pinned in this build: " ++ sha
+  pure env{ runCommit = Just ci }
+
 runCommand env (BeaconLoadCommit ref) = do
   cacheHit <- if isHexRef ref then lookupRevCache else pure Nothing
   case cacheHit of
@@ -290,6 +313,18 @@ runCommand env (BeaconLoadCommit ref) = do
 runCommand env@Env{ runCommit = Nothing } cmd@(BeaconBuild ver) = do
   env' <- runCommand env (BeaconLoadCommit $ verGitRef ver)
   runCommand env' cmd
+
+-- Nothing to build: the payload already carries db-analyser and the build
+-- plan it was produced from.
+runCommand env@Env{ runProvenance = Just prov } (BeaconBuild _ver) = do
+  let install = provenanceInstallInfo prov
+      exe     = installExePath install
+  exists <- doesFileExist exe
+  unless exists $
+    printFatalAndDie $ "payload is missing its db-analyser at '" ++ exe ++ "'"
+  printStyled StyleNone $ "using bundled binary: " ++ exe
+  pure env { runInstall = Just install }
+
 runCommand env (BeaconBuild ver) = do
   install <- shellNixBuildVersion env ver
   printStyled StyleNone $ "installed binary is: " ++ installExePath install

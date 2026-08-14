@@ -19,6 +19,16 @@ extra-doc-files:
   CHANGELOG.md
   README.md
 
+flag plots
+  description:
+    Render measurement scatter plots via Chart-cairo. Disabling this drops
+    cairo, glib, fontconfig, freetype, pixman and the X11 client libraries
+    from the closure -- 12 of the 28 shared libraries an otherwise-identical
+    build carries -- which matters for producing a self-contained, statically
+    linked distributable. A benchmark run itself never plots.
+  default:     True
+  manual:      True
+
 executable beacon
   hs-source-dirs:     app
   main-is:            beacon.hs
@@ -28,6 +38,8 @@ executable beacon
     Cardano.Beacon.CLI
     Cardano.Beacon.Compare
     Cardano.Beacon.Console
+    Cardano.Beacon.Plot
+    Cardano.Beacon.Provenance
     Cardano.Beacon.Run
     Cardano.Beacon.RunMeta
     Cardano.Beacon.SlotDataPoint
@@ -57,8 +69,6 @@ executable beacon
     , bytestring
     , cabal-plan
     , cardano-slotting
-    , Chart                 >=1.9
-    , Chart-cairo           >=1.9
     , containers
     , directory
     , extra
@@ -75,5 +85,14 @@ executable beacon
     , validation-selective
     , vector
     , vector-algorithms
+
+  if flag(plots)
+    hs-source-dirs: plots
+    build-depends:
+      , Chart        >=1.9
+      , Chart-cairo  >=1.9
+
+  else
+    hs-source-dirs: no-plots
 
 -- , ouroboros-consensus-cardano:unstable-cardano-tools  >= 0.12.1
