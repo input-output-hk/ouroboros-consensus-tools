@@ -115,7 +115,7 @@ parseCommand =  subparser $ mconcat
   , op "variance" "Perform variace analysis on all runs for certain slug"
       (BeaconVariance <$> parseSlug)
   , op "test-github" "Test the GitHub query on a given git ref"
-      (BeaconLoadCommit <$> parseRevision)
+      (BeaconLoadCommit <$> parseRequiredRevision)
   ]
   where
     op :: String -> String -> Parser a -> Mod CommandFields a
@@ -123,22 +123,43 @@ parseCommand =  subparser $ mconcat
      command c $ info (p <**> helper) $
        mconcat [ progDesc descr ]
 
+    -- A build that bundles its own db-analyser already knows the revision,
+    -- and can only either agree with a --rev or reject it. So --rev is
+    -- optional, and an omitted one is filled in from the payload later (see
+    -- 'resolveVersion' in beacon.hs). It stays mandatory for a checkout,
+    -- which has no revision to default to.
+    --
+    -- The empty string means "unspecified"; it never survives 'resolveVersion'.
     parseRevision :: Parser String
     parseRevision = strOption
+      (mconcat
+        [ long "rev"
+        , metavar "REF"
+        , value ""
+        , help "Commit hash (full or shortened) or tag or branch name. \
+               \Defaults to the db-analyser bundled with this build, and is \
+               \required if there is none."
+        ])
+
+    parseRequiredRevision :: Parser String
+    parseRequiredRevision = strOption
       (mconcat
         [ long "rev"
         , metavar "REF"
         , help "Commit hash (full or shortened) or tag or branch name"
         ])
 
+    -- As for --rev: empty means "unspecified", resolved against the payload
+    -- if there is one and defaulted to haskell96 otherwise.
     parseGHCVersion :: Parser String
     parseGHCVersion = strOption
       (mconcat
         [ long "ghc"
         , metavar "VER"
-        , value "haskell96"
-        , showDefault
-        , help "Compiler version; cf. ouroboros-consensus-cardano/README.md#Assertions"
+        , value ""
+        , help "Compiler version; cf. ouroboros-consensus-cardano/README.md#Assertions. \
+               \Defaults to the one this build's db-analyser was compiled with, \
+               \or haskell96."
         ])
 
     parseChainName :: Parser String
