@@ -1,0 +1,165 @@
+name: Glue static payload
+
+# The musl builds, split out of glue.yml so they can be path-filtered.
+#
+# GitHub filters paths per workflow, not per job, and these are the expensive
+# ones: a from-source musl build of consensus on each of two architectures,
+# roughly half an hour apiece. Running them on every pull request would mean
+# most PRs spending an hour rebuilding something they did not touch.
+#
+# The filter covers nix files and beacon.cabal rather than nix files alone:
+# a dependency change is the realistic way a pure-Haskell PR breaks the static
+# link, as liburing did. Changes to beacon's *sources* do not trigger these --
+# glue.yml still builds beacon on both platforms, and the same code against a
+# different libc is a small risk to carry for the runner time saved.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+  merge_group:
+  pull_request:
+    paths: &nix-paths
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'nix/**'
+      - 'perSystem/**'
+      - 'beacon/beacon.cabal'
+      - '.github/workflows/glue-static.yml'
+  push:
+    branches:
+      - main
+    paths: *nix-paths
+
+jobs:
+  # A binary cache (cachix) would still be worth having so this cost is paid
+  # once rather than per cold runner, but it is no longer a prerequisite: the
+  # build reaches the linker in well under an hour.
+  static:
+    name: Static musl payload (x86_64-linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo rm -rf /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      - name: Install nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://cache.iog.io
+            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
+            allow-import-from-derivation = true
+
+      # Evaluation is fast and fails fast. Separating it means a wrong
+      # attribute path is reported in seconds instead of after a long build.
+      - name: Evaluate static payload
+        run: nix eval --raw .#glue-payload-static.drvPath
+
+      - name: Build static payload
+        run: nix build .#glue-payload-static --print-build-logs -o /tmp/glue-static
+
+      # The whole point: no interpreter, no shared libraries, no store paths.
+      # Asserted rather than assumed, because haskell.nix producing genuinely
+      # static executables from projectCross.musl64 is exactly the thing that
+      # could quietly not be true.
+      - name: Verify the binaries are actually static
+        run: |
+          set -euo pipefail
+          for b in beacon db-analyser jq time; do
+            f=/tmp/glue-static/bin/$b
+            echo "--- $b ---"
+            file -L "$f"
+            if ldd "$f" 2>&1 | grep -qv "not a dynamic executable"; then
+              echo "::error::$b is dynamically linked"
+              ldd "$f" || true
+              exit 1
+            fi
+          done
+
+      - name: Verify it runs after being copied out of the store
+        run: |
+          set -euo pipefail
+          cp -RL /tmp/glue-static /tmp/moved
+          chmod -R u+w /tmp/moved
+          if grep -rIl "/nix/store" /tmp/moved/bin 2>/dev/null | grep .; then
+            echo "::error::store paths remain in the copied payload"
+            exit 1
+          fi
+          mkdir -p /tmp/static-data
+          env -i PATH=/usr/bin:/bin HOME=/tmp \
+            /tmp/moved/bin/beacon --data-dir /tmp/static-data build | tee /tmp/static.log
+          grep -q "using bundled binary" /tmp/static.log
+
+  # aarch64-linux builds natively on an ARM runner rather than being
+  # cross-compiled from x86_64. Cross-*architecture* is not merely slower: the
+  # Template Haskell splices haskell.nix evaluates through
+  # iserv-proxy-interpreter need the target's object code loaded on the
+  # builder, and an x86_64 host cannot load aarch64 objects -- it dies in
+  # libstdc++ with "Failed to lookup symbol: _Unwind_Resume". Building on ARM
+  # makes it a same-architecture musl cross, exactly like musl64 on x86_64.
+  #
+  # consensus's flake declares no aarch64-linux, so this instantiates its
+  # project from source; nothing musl is cached in any case.
+  static-aarch64:
+    name: Static musl payload (aarch64-linux)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 350
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo rm -rf /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      - name: Install nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://cache.iog.io
+            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
+            allow-import-from-derivation = true
+
+      - name: Evaluate static payload
+        run: nix eval --raw .#glue-payload-static.drvPath
+
+      - name: Build static payload
+        run: nix build .#glue-payload-static --print-build-logs -o /tmp/glue-static
+
+      - name: Verify the binaries are actually static
+        run: |
+          set -euo pipefail
+          for b in beacon db-analyser jq time curl unzip; do
+            f=/tmp/glue-static/bin/$b
+            file -L "$f"
+            file -L "$f" | grep -q "ARM aarch64"
+            if ldd "$f" 2>&1 | grep -qv "not a dynamic executable"; then
+              echo "::error::$b is dynamically linked"
+              exit 1
+            fi
+          done
+
+      - name: Verify it runs after being copied out of the store
+        run: |
+          set -euo pipefail
+          cp -RL /tmp/glue-static /tmp/moved
+          chmod -R u+w /tmp/moved
+          mkdir -p /tmp/data/chain
+          echo '{}' > /tmp/data/chain/chain-register.json
+          env -i PATH=/usr/bin:/bin HOME=/tmp \
+            /tmp/moved/bin/beacon --data-dir /tmp/data list-chains | tee /tmp/arm.log
+          grep -qi "registered chain" /tmp/arm.log
