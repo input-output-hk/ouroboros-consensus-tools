@@ -1,10 +1,11 @@
-name: Glue static payload
+name: Glue distributable artifacts
 
-# The musl builds, split out of glue.yml so they can be path-filtered.
+# The downloadable artifacts, split out of glue.yml so they can be
+# path-filtered.
 #
 # GitHub filters paths per workflow, not per job, and these are the expensive
-# ones: a from-source musl build of consensus on each of two architectures,
-# roughly half an hour apiece. Running them on every pull request would mean
+# ones: a from-source musl build of consensus on each of two Linux
+# architectures, roughly half an hour apiece, plus a darwin build. Running them on every pull request would mean
 # most PRs spending an hour rebuilding something they did not touch.
 #
 # The filter covers nix files and beacon.cabal rather than nix files alone:
@@ -26,7 +27,7 @@ on:
       - 'nix/**'
       - 'perSystem/**'
       - 'beacon/beacon.cabal'
-      - '.github/workflows/glue-static.yml'
+      - '.github/workflows/glue-artifacts.yml'
   push:
     branches:
       - main
@@ -236,4 +237,93 @@ jobs:
           path: |
             /tmp/glue-aarch64-linux
             /tmp/glue-aarch64-linux.sha256
+          retention-days: 14
+
+  # aarch64-darwin. Optional per ouroboros-leios#1048, but it is where this
+  # work is developed, and it is the only platform whose artifact goes through
+  # nix/relocate.nix rather than being statically linked -- so it exercises a
+  # code path the Linux jobs never touch.
+  #
+  # Non-blocking until it has gone green once.
+  darwin:
+    name: Relocated payload (aarch64-darwin)
+    runs-on: macos-15
+    continue-on-error: true
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://cache.iog.io
+            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
+            allow-import-from-derivation = true
+
+      - name: Build the relocated payload
+        run: nix build .#glue-relocatable --print-build-logs -o /tmp/glue-reloc
+
+      # The point of relocation: nothing may still name the store, since the
+      # machine this lands on has none. Every dylib reference must have been
+      # rewritten to @executable_path/@loader_path.
+      - name: Verify no store references survive
+        run: |
+          set -euo pipefail
+          cp -RL /tmp/glue-reloc /tmp/moved
+          chmod -R u+w /tmp/moved
+          residual=0
+          for f in /tmp/moved/bin/* /tmp/moved/lib/*; do
+            n=$(otool -L "$f" 2>/dev/null | tail -n +2 | grep -c '/nix/store' || true)
+            if [ "$n" -gt 0 ]; then
+              echo "::error::$(basename "$f") still references the nix store"
+              otool -L "$f" | grep '/nix/store' || true
+              residual=$((residual + n))
+            fi
+          done
+          echo "residual store references: $residual"
+          test "$residual" -eq 0
+
+      - name: Verify it runs after being copied out of the store
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/data/chain
+          echo '{}' > /tmp/data/chain/chain-register.json
+          env -i PATH=/usr/bin:/bin HOME=/tmp \
+            /tmp/moved/bin/beacon --data-dir /tmp/data list-chains 2>&1 | tee /tmp/reloc.log
+          grep -qi "registered chain" /tmp/reloc.log
+
+      - name: Build and exercise the single-file artifact
+        run: |
+          set -euo pipefail
+          nix build .#glue --print-build-logs -o /tmp/glue-exe
+          cp -L /tmp/glue-exe /tmp/glue-aarch64-darwin
+          chmod +x /tmp/glue-aarch64-darwin
+          echo "artifact size: $(stat -f%z /tmp/glue-aarch64-darwin) bytes"
+
+          env -i PATH=/usr/bin:/bin HOME=/tmp GLUE_HOME=/tmp/glue-home \
+            /tmp/glue-aarch64-darwin --data-dir /tmp/data list-chains 2>&1 | tee /tmp/first.log
+          grep -qi "registered chain" /tmp/first.log
+
+          marker=$(find /tmp/glue-home -name .complete | head -1)
+          test -n "$marker"
+          stamp=$(stat -f%m "$marker")
+
+          env -i PATH=/usr/bin:/bin HOME=/tmp GLUE_HOME=/tmp/glue-home \
+            /tmp/glue-aarch64-darwin --data-dir /tmp/data list-chains 2>&1 | tee /tmp/second.log
+          grep -qi "registered chain" /tmp/second.log
+          test "$stamp" = "$(stat -f%m "$marker")"
+
+          shasum -a 256 /tmp/glue-aarch64-darwin | tee /tmp/glue-aarch64-darwin.sha256
+
+      - name: Upload the artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: glue-aarch64-darwin
+          path: |
+            /tmp/glue-aarch64-darwin
+            /tmp/glue-aarch64-darwin.sha256
           retention-days: 14
