@@ -31,8 +31,8 @@ module Cardano.Beacon.Provenance (
   , Provenance (..)
   , loadPayloadProvenance
   , provenanceCommitInfo
-  , provenanceTool
   , provenanceInstallInfo
+  , provenanceTool
   , provenanceVersion
   ) where
 

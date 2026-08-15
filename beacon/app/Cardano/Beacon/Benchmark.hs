@@ -32,13 +32,13 @@ import           Cardano.Beacon.Types
 
 -- | One configuration to measure, and the slug its results will land under.
 data PlannedRun = PlannedRun
-  { prLabel    :: !String
+  { prLabel   :: !String
     -- ^ Human-readable, for progress output.
-  , prSlug     :: !String
+  , prSlug    :: !String
     -- ^ Where the run will be stored; known in advance so the summary can be
     -- requested without parsing beacon's own output for it (which is what the
     -- shell script had to do).
-  , prCommand  :: !BeaconCommand
+  , prCommand :: !BeaconCommand
   }
 
 data BenchmarkPlan = BenchmarkPlan

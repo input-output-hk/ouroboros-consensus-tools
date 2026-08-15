@@ -17,9 +17,7 @@
 --
 -- No tar, no zip, nothing to bundle, nothing for the recipient to unpack, and
 -- it stays readable by anything that speaks JSON.
-module Cardano.Beacon.Report (
-    writeReport
-  ) where
+module Cardano.Beacon.Report (writeReport) where
 
 import           Cardano.Beacon.Console
 import           Cardano.Beacon.SysInfo (SysInfo)

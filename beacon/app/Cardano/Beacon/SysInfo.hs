@@ -39,14 +39,14 @@ import           Text.Read (readMaybe)
 
 
 data SysInfo = SysInfo
-  { siOs          :: !String
-  , siArch        :: !String
-  , siCpuModel    :: !(Maybe String)
-  , siCpuCores    :: !(Maybe Int)
+  { siOs         :: !String
+  , siArch       :: !String
+  , siCpuModel   :: !(Maybe String)
+  , siCpuCores   :: !(Maybe Int)
     -- ^ Logical CPUs as the OS reports them.
-  , siMemTotalKb  :: !(Maybe Integer)
-  , siKernel      :: !(Maybe String)
-  , siDataDisk    :: !(Maybe DiskInfo)
+  , siMemTotalKb :: !(Maybe Integer)
+  , siKernel     :: !(Maybe String)
+  , siDataDisk   :: !(Maybe DiskInfo)
     -- ^ The device backing the benchmark's data directory -- the one whose
     -- latency the on-disk configurations are measuring.
   }

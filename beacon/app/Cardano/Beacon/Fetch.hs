@@ -45,9 +45,9 @@ import qualified Data.Text as T
 import           System.Directory (createDirectoryIfMissing, doesDirectoryExist,
                      doesFileExist, getFileSize, listDirectory, removeDirectory,
                      removeFile, renameDirectory)
+import           System.Exit (ExitCode (..))
 import           System.FilePath ((</>))
 import           System.Process (rawSystem)
-import           System.Exit (ExitCode (..))
 
 
 data ChainManifest = ChainManifest

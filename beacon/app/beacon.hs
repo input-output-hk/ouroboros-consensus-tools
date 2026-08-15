@@ -67,8 +67,8 @@ import           Cardano.Beacon.Fetch
 import           Cardano.Beacon.Provenance
 import           Cardano.Beacon.Report
 import           Cardano.Beacon.Run
-import           Cardano.Beacon.SysInfo
 import           Cardano.Beacon.RunMeta
+import           Cardano.Beacon.SysInfo
 import           Cardano.Beacon.Types
 import           Control.Concurrent (threadDelay)
 import           Control.Exception (SomeException, bracket_, catchJust,
@@ -80,10 +80,10 @@ import           Data.Aeson (eitherDecodeFileStrict, eitherDecodeStrict',
 import           Data.Either (fromRight, rights)
 import           Data.List (intercalate, isPrefixOf, partition, sort, sortOn)
 import qualified Data.Map as Map
-import qualified Data.Text as T
 import           Data.Maybe (fromJust, fromMaybe, listToMaybe, mapMaybe)
 import           Data.Monoid
 import           Data.Ord (Down (..))
+import qualified Data.Text as T
 import           Data.Time.Clock (getCurrentTime)
 import           Data.Traversable (for)
 import           Data.Version (showVersion)
@@ -92,8 +92,7 @@ import qualified Paths_beacon as Paths (version)
 import           System.Directory
 import           System.Environment (getExecutablePath)
 import           System.FilePath
-import           System.IO (hClose, hPutStr, hSetEncoding, stderr,
-                     stdout, utf8)
+import           System.IO (hClose, hPutStr, hSetEncoding, stderr, stdout, utf8)
 import           System.IO.Error (isAlreadyExistsError, isDoesNotExistError)
 import           System.Posix.Files (stdFileMode)
 import           System.Posix.IO (OpenFileFlags (creat, exclusive),
