@@ -63,6 +63,7 @@ import           Cardano.Beacon.Chain
 import           Cardano.Beacon.CLI
 import           Cardano.Beacon.Compare
 import           Cardano.Beacon.Console
+import           Cardano.Beacon.Fetch
 import           Cardano.Beacon.Provenance
 import           Cardano.Beacon.Run
 import           Cardano.Beacon.RunMeta
@@ -136,6 +137,30 @@ main = do
     (runCommands env commands')
     (printFatalAndDie $ "beacon data directory missing: " ++ optBeaconDir options)
 
+
+-- | Acquire the fragment to benchmark, if this build knows where to get one.
+--
+-- Only distributable builds carry a chain manifest; a development checkout has
+-- none, and its chains are managed by hand as before. Downloading is therefore
+-- something the SPO-facing path does and the developer path never does.
+fetchIfNeeded :: RunEnvironment -> Maybe ChainName -> IO ()
+fetchIfNeeded env mChain =
+  case runProvenance env of
+    Nothing   -> pure ()
+    Just prov -> do
+      let manifestPath = provShareDir prov </> "chain-manifest.json"
+      loadManifest manifestPath >>= \case
+        Nothing -> pure ()
+        Just manifest ->
+          case manifestChain manifest mChain of
+            Left err -> printFatalAndDie err
+            Right mc ->
+              ensureChain
+                (envTool env "curl")
+                (envTool env "unzip")
+                (envBeaconDir env </> "chain")
+                (cmBaseUrl manifest)
+                mc
 
 isBenchmark :: BeaconCommand -> Bool
 isBenchmark BeaconBenchmark{} = True
@@ -408,6 +433,8 @@ runCommand env@Env{ runInstall = Just{}, runCapabilities = Nothing } cmd@BeaconB
   caps <- detectEnvironmentCapabilities env
   runCommand env { runCapabilities = Just caps } cmd
 runCommand env@Env{ runChains = Nothing } cmd@BeaconBenchmark{} = do
+  let BeaconBenchmark mChain _ _ = cmd
+  fetchIfNeeded env mChain
   env' <- runCommand env BeaconLoadChains
   runCommand env' cmd
 runCommand env@Env{..} (BeaconBenchmark mChain ver count) = do

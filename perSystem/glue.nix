@@ -259,6 +259,13 @@
       tools = {
         jq = "jq";
         time = "time";
+        # Chain acquisition. curl for a resumable, redirect-following download
+        # of an ~800 MiB fragment; unzip to unpack it. Bundled rather than
+        # assumed for the same reason as the others -- and because a static
+        # musl beacon linking a TLS stack of its own would be a much larger
+        # commitment than shipping a curl that already works.
+        curl = "curl";
+        unzip = "unzip";
       };
     };
 
@@ -268,6 +275,8 @@
       analyzerExe,
       jq,
       time,
+      curl,
+      unzip,
       static,
       # Probe a different binary for supported flags. Needed when the payload's
       # own db-analyser is for another architecture and cannot be executed here.
@@ -298,9 +307,12 @@
           # with no -v/-o, which silently costs the run its memory metrics.
           install -m755 ${jq}/bin/jq                     $out/bin/jq
           install -m755 ${time}/bin/time                 $out/bin/time
+          install -m755 ${curl}/bin/curl                 $out/bin/curl
+          install -m755 ${unzip}/bin/unzip               $out/bin/unzip
 
           cp ${provenanceFile}                 $out/share/provenance.json
           cp ${capabilities}/capabilities.json $out/share/capabilities.json
+          cp ${../data/chain-manifest.json}    $out/share/chain-manifest.json
           cp ${planNix}/plan.json              $out/share/plan.json
         '';
 
@@ -315,7 +327,7 @@
       pname = "glue-payload";
       beaconExe = beacon;
       analyzerExe = dbAnalyser;
-      inherit (pkgs) jq time;
+      inherit (pkgs) jq time curl unzip;
       static = false;
     };
 
@@ -323,7 +335,7 @@
       pname = "glue-payload-static";
       beaconExe = beaconStatic;
       analyzerExe = dbAnalyserStatic;
-      inherit (pkgs.pkgsStatic) jq time;
+      inherit (pkgs.pkgsStatic) jq time curl unzip;
       static = true;
     };
 
