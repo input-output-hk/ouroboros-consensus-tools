@@ -238,20 +238,6 @@ jobs:
             fi
           done
 
-      # Cross-compiled here because consensus's flake does not declare
-      # aarch64-linux; see perSystem/glue.nix. Built in this job and smoke-
-      # tested in `static-aarch64`, since a cross-built binary that has never
-      # been executed on the target is not evidence of anything.
-      - name: Build aarch64-linux artifact (cross)
-        run: nix build .#glue-aarch64-linux --print-build-logs -o /tmp/glue-aarch64
-
-      - name: Upload aarch64-linux artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: glue-aarch64-linux
-          path: /tmp/glue-aarch64
-          retention-days: 7
-
       - name: Verify it runs after being copied out of the store
         run: |
           set -euo pipefail
@@ -266,41 +252,67 @@ jobs:
             /tmp/moved/bin/beacon --data-dir /tmp/static-data build | tee /tmp/static.log
           grep -q "using bundled binary" /tmp/static.log
 
-  # The cross-built aarch64 artifact, executed on actual aarch64 hardware.
+  # aarch64-linux builds natively on an ARM runner rather than being
+  # cross-compiled from x86_64. Cross-*architecture* is not merely slower: the
+  # Template Haskell splices haskell.nix evaluates through
+  # iserv-proxy-interpreter need the target's object code loaded on the
+  # builder, and an x86_64 host cannot load aarch64 objects -- it dies in
+  # libstdc++ with "Failed to lookup symbol: _Unwind_Resume". Building on ARM
+  # makes it a same-architecture musl cross, exactly like musl64 on x86_64.
+  #
+  # consensus's flake declares no aarch64-linux, so this instantiates its
+  # project from source; nothing musl is cached in any case.
   static-aarch64:
-    name: Static musl payload, run on aarch64
+    name: Static musl payload (aarch64-linux)
     runs-on: ubuntu-24.04-arm
-    needs: static
     continue-on-error: true
+    timeout-minutes: 350
 
     steps:
-      - name: Download the cross-built artifact
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo rm -rf /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      - name: Install nix
+        uses: cachix/install-nix-action@v31
         with:
-          name: glue-aarch64-linux
-          path: /tmp/artifact
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://cache.iog.io
+            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
+            allow-import-from-derivation = true
 
-      - name: Verify it is an aarch64 static binary
+      - name: Evaluate static payload
+        run: nix eval --raw .#glue-payload-static.drvPath
+
+      - name: Build static payload
+        run: nix build .#glue-payload-static --print-build-logs -o /tmp/glue-static
+
+      - name: Verify the binaries are actually static
         run: |
           set -euo pipefail
-          chmod +x /tmp/artifact/glue-aarch64
-          # The artifact is a shell header with a tar appended, so `file` on it
-          # says "shell script"; unpack first and inspect what is inside.
-          mkdir -p /tmp/unpacked
-          GLUE_HOME=/tmp/unpacked /tmp/artifact/glue-aarch64 --help >/dev/null 2>&1 || true
-          bin=$(find /tmp/unpacked -name beacon -type f | head -1)
-          test -n "$bin"
-          file "$bin"
-          file "$bin" | grep -q "ARM aarch64"
-          file "$bin" | grep -q "statically linked"
+          for b in beacon db-analyser jq time curl unzip; do
+            f=/tmp/glue-static/bin/$b
+            file -L "$f"
+            file -L "$f" | grep -q "ARM aarch64"
+            if ldd "$f" 2>&1 | grep -qv "not a dynamic executable"; then
+              echo "::error::$b is dynamically linked"
+              exit 1
+            fi
+          done
 
-      # The point of the whole job: a binary cross-compiled on x86_64 actually
-      # starting on aarch64 hardware.
-      - name: Run it
+      - name: Verify it runs after being copied out of the store
         run: |
           set -euo pipefail
+          cp -RL /tmp/glue-static /tmp/moved
+          chmod -R u+w /tmp/moved
           mkdir -p /tmp/data/chain
           echo '{}' > /tmp/data/chain/chain-register.json
-          GLUE_HOME=/tmp/unpacked /tmp/artifact/glue-aarch64 \
-            --data-dir /tmp/data list-chains | tee /tmp/arm.log
+          env -i PATH=/usr/bin:/bin HOME=/tmp \
+            /tmp/moved/bin/beacon --data-dir /tmp/data list-chains | tee /tmp/arm.log
           grep -qi "registered chain" /tmp/arm.log

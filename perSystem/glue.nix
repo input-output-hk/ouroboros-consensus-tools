@@ -39,10 +39,24 @@
     consensusSystems = builtins.attrNames consensus.hydraJobs;
     available = builtins.elem system consensusSystems;
 
-    # musl cross is only wired up for x86_64 so far. aarch64-linux needs
-    # pkgsCross.aarch64-multiplatform-musl and a consensus that builds there
-    # at all; see above.
-    staticAvailable = available && system == "x86_64-linux";
+    isLinux = pkgs.stdenv.hostPlatform.isLinux;
+
+    # Static payloads are built for both Linux targets, but only ever
+    # same-architecture: x86_64 -> x86_64-musl, aarch64 -> aarch64-musl.
+    #
+    # Cross-*architecture* is not an option, and not for want of a flag.
+    # haskell.nix evaluates Template Haskell splices through
+    # iserv-proxy-interpreter, which has to load the target's object code; an
+    # x86_64 builder cannot load aarch64 objects, and the build dies in
+    # libstdc++ with "Failed to lookup symbol: _Unwind_Resume" long before it
+    # reaches our code. musl64 on x86_64 works precisely because it is the
+    # same architecture.
+    staticAvailable = isLinux;
+
+    muslCross =
+      if system == "aarch64-linux"
+      then "aarch64-multiplatform-musl"
+      else "musl64";
 
     # Precisely what IOG's Hydra builds and cache.iog.io serves. `exesNoAsserts`
     # is not incidental: assertions sit on the measured path and would skew
@@ -70,8 +84,33 @@
     # haskell.nix's musl cross disables shared libraries, so executables come
     # out static without further -optl flags. CI asserts that rather than
     # trusting it.
+    # Where consensus's flake declares this system we use its own project, so
+    # native builds keep hitting cache.iog.io. Where it does not -- aarch64-linux
+    # -- we instantiate the same project from its source. That is only viable
+    # because the static payload is a from-source build regardless.
     consensusProject =
-      consensus.legacyPackages.${system}.hsPkgs.ouroboros-consensus.project;
+      if available
+      then consensus.legacyPackages.${system}.hsPkgs.ouroboros-consensus.project
+      else
+        pkgs.haskell-nix.cabalProject' {
+          src = pkgs.applyPatches {
+            name = "consensus-src-no-asserts";
+            src = consensus;
+            # Consensus disables assertions with a `noAsserts` flake variant
+            # that blanks this file; reproduced here since we are not going
+            # through their flake. Assertions sit on the measured path.
+            postPatch = "echo > cabal/asserts.cabal";
+          };
+          compiler-nix-name = "ghc967";
+          inputMap = {"https://chap.intersectmbo.org/" = inputs.CHaP;};
+        };
+
+    # The noAsserts variant only exists on the flake-provided project; the
+    # from-source one already has assertions patched out.
+    consensusNoAsserts =
+      if available
+      then consensusProject.projectVariants.noAsserts
+      else consensusProject;
 
     # The LSM backend links liburing (io_uring). The musl package set puts only
     # a shared build in the default link path, so a fully static link fails:
@@ -96,40 +135,16 @@
     # `ouroboros-consensus-cardano` one -- that package does not exist at this
     # pin, which is also why the run manifest lists only ouroboros-consensus.
     dbAnalyserStatic =
-      (consensusProject.projectVariants.noAsserts.appendModule {
-        modules = [staticLinkModule];
-      })
-      .projectCross.musl64
-      .hsPkgs.ouroboros-consensus.components.exes.db-analyser;
-
-    beaconStatic =
-      beaconProject.projectCross.musl64.hsPkgs.beacon.components.exes.beacon;
-
-    # -- aarch64-linux, cross-compiled from x86_64-linux -------------------
-    #
-    # consensus's flake does not declare aarch64-linux, so there is no
-    # legacyPackages.aarch64-linux to consume -- but that only rules out
-    # building *on* aarch64. Cross-compiling *to* it from x86_64-linux needs
-    # nothing from consensus's flake outputs, and since the musl payload is a
-    # from-source build either way, this costs no more than the native one.
-    #
-    # The artifact is therefore produced on x86_64-linux and exposed there;
-    # CI builds it in that job and smoke-tests it on an ARM runner.
-    crossAarch64 = "aarch64-multiplatform-musl";
-
-    dbAnalyserStaticAarch64 =
-      (consensusProject.projectVariants.noAsserts.appendModule {
+      (consensusNoAsserts.appendModule {
         modules = [staticLinkModule];
       })
       .projectCross.${
-        crossAarch64
+        muslCross
       }
       .hsPkgs.ouroboros-consensus.components.exes.db-analyser;
 
-    beaconStaticAarch64 =
-      beaconProject.projectCross.${crossAarch64}.hsPkgs.beacon.components.exes.beacon;
-
-    pkgsAarch64Static = pkgs.pkgsCross.${crossAarch64}.pkgsStatic;
+    beaconStatic =
+      beaconProject.projectCross.${muslCross}.hsPkgs.beacon.components.exes.beacon;
 
     # The cabal build plan db-analyser was built from. beacon reads
     # `<installPlanPath>/plan.json` to record which ouroboros-consensus /
@@ -305,19 +320,6 @@
       static = false;
     };
 
-    payloadStaticAarch64 = mkPayload {
-      pname = "glue-payload-static-aarch64";
-      beaconExe = beaconStaticAarch64;
-      analyzerExe = dbAnalyserStaticAarch64;
-      inherit (pkgsAarch64Static) jq time curl unzip;
-      static = true;
-      # An aarch64 binary cannot be run on the x86_64 builder, so its flags
-      # cannot be probed by running --help. They come from the same
-      # db-analyser revision as the native build, so reuse that answer rather
-      # than inventing one.
-      capabilitiesFrom = dbAnalyserStatic;
-    };
-
     payloadStatic = mkPayload {
       pname = "glue-payload-static";
       beaconExe = beaconStatic;
@@ -361,11 +363,6 @@
           name = "glue";
         };
 
-        glue-payload-static-aarch64 = payloadStaticAarch64;
-        glue-aarch64-linux = mkSelfExtracting {
-          payload = payloadStaticAarch64;
-          name = "glue-aarch64-linux";
-        };
         db-analyser-static = dbAnalyserStatic;
         beacon-static = beaconStatic;
       };
