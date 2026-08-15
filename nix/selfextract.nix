@@ -60,6 +60,14 @@
       start=$(awk '/^__GLUE_ARCHIVE_BELOW__$/ { print NR + 1; exit 0 }' "$SELF")
       tail -n +"$start" "$SELF" | tar xzf - -C "$staging"
 
+      # Everything in the payload comes from the nix store, where it is
+      # read-only, and GNU tar restores those modes -- on directories too.
+      # Without this the tree cannot be marked complete, and a later cleanup
+      # of a stale staging directory would fail as well. macOS's bsdtar does
+      # not restore the mode of "." in the same way, which is why this only
+      # showed up once Linux ran it.
+      chmod -R u+w "$staging"
+
       touch "$staging/.complete"
       mkdir -p "$ROOT"
       rm -rf "$DIR"
