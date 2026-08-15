@@ -125,10 +125,56 @@ main = do
   let env = (envEmpty options { optMachineId = hostName })
               { runProvenance = provenance }
 
+  commands' <- traverse (resolveVersion provenance) commands
+
   ifM (doesDirectoryExist $ optBeaconDir options)
-    (runCommands env commands)
+    (runCommands env commands')
     (printFatalAndDie $ "beacon data directory missing: " ++ optBeaconDir options)
 
+
+-- | Fill in a 'Version' the user did not fully specify.
+--
+-- A build that bundles its own db-analyser knows both the revision and the
+-- compiler, so requiring the user to repeat them is ceremony: the only two
+-- possible outcomes are agreement or refusal. A checkout has nothing to
+-- default to, so there --rev stays mandatory.
+--
+-- This is the single place where the "" placeholders produced by
+-- 'Cardano.Beacon.CLI.parseRevision' / 'parseGHCVersion' are eliminated;
+-- nothing downstream ever sees one.
+resolveVersion :: Maybe Provenance -> BeaconCommand -> IO BeaconCommand
+resolveVersion mProv = \case
+    BeaconBuild ver              -> BeaconBuild <$> fill ver
+    BeaconDoRun c ver n a b m    -> (\v -> BeaconDoRun c v n a b m) <$> fill ver
+    cmd                          -> pure cmd
+  where
+    fill ver = do
+      gitRef   <- resolveRef (verGitRef ver)
+      compiler <- resolveCompiler (verCompiler ver)
+      pure ver { verGitRef = gitRef, verCompiler = compiler }
+
+    resolveRef ref
+      | not (null ref) = pure ref
+      | otherwise = case mProv of
+          Just prov -> pure $ ciCommitSHA1 (provenanceCommitInfo prov)
+          Nothing   -> printFatalAndDie
+            "--rev is required: this build does not bundle a db-analyser to \
+            \default to."
+
+    -- Unlike the revision, a mismatched compiler is refused here rather than
+    -- later: it never reaches the GitHub lookup that catches a bad --rev, and
+    -- silently benchmarking one compiler while labelling the run with another
+    -- would corrupt the run's slug and its stored metadata.
+    resolveCompiler comp = case (null comp, mProv) of
+      (True,  Just prov) -> pure $ apCompiler (provAnalyzer prov)
+      (True,  Nothing)   -> pure defaultCompiler
+      (False, Just prov)
+        | comp /= apCompiler (provAnalyzer prov) -> printFatalAndDie $
+            "this build's db-analyser was compiled with "
+            ++ apCompiler (provAnalyzer prov) ++ ", not " ++ comp ++ "."
+      (False, _)         -> pure comp
+
+    defaultCompiler = "haskell96"
 
 -- constants
 
