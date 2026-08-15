@@ -40,6 +40,7 @@ executable beacon
     Cardano.Beacon.Compare
     Cardano.Beacon.Console
     Cardano.Beacon.Plot
+    Cardano.Beacon.Provenance
     Cardano.Beacon.Run
     Cardano.Beacon.RunMeta
     Cardano.Beacon.SlotDataPoint
