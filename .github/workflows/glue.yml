@@ -238,6 +238,20 @@ jobs:
             fi
           done
 
+      # Cross-compiled here because consensus's flake does not declare
+      # aarch64-linux; see perSystem/glue.nix. Built in this job and smoke-
+      # tested in `static-aarch64`, since a cross-built binary that has never
+      # been executed on the target is not evidence of anything.
+      - name: Build aarch64-linux artifact (cross)
+        run: nix build .#glue-aarch64-linux --print-build-logs -o /tmp/glue-aarch64
+
+      - name: Upload aarch64-linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: glue-aarch64-linux
+          path: /tmp/glue-aarch64
+          retention-days: 7
+
       - name: Verify it runs after being copied out of the store
         run: |
           set -euo pipefail
@@ -251,3 +265,42 @@ jobs:
           env -i PATH=/usr/bin:/bin HOME=/tmp \
             /tmp/moved/bin/beacon --data-dir /tmp/static-data build | tee /tmp/static.log
           grep -q "using bundled binary" /tmp/static.log
+
+  # The cross-built aarch64 artifact, executed on actual aarch64 hardware.
+  static-aarch64:
+    name: Static musl payload, run on aarch64
+    runs-on: ubuntu-24.04-arm
+    needs: static
+    continue-on-error: true
+
+    steps:
+      - name: Download the cross-built artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: glue-aarch64-linux
+          path: /tmp/artifact
+
+      - name: Verify it is an aarch64 static binary
+        run: |
+          set -euo pipefail
+          chmod +x /tmp/artifact/glue-aarch64
+          # The artifact is a shell header with a tar appended, so `file` on it
+          # says "shell script"; unpack first and inspect what is inside.
+          mkdir -p /tmp/unpacked
+          GLUE_HOME=/tmp/unpacked /tmp/artifact/glue-aarch64 --help >/dev/null 2>&1 || true
+          bin=$(find /tmp/unpacked -name beacon -type f | head -1)
+          test -n "$bin"
+          file "$bin"
+          file "$bin" | grep -q "ARM aarch64"
+          file "$bin" | grep -q "statically linked"
+
+      # The point of the whole job: a binary cross-compiled on x86_64 actually
+      # starting on aarch64 hardware.
+      - name: Run it
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/data/chain
+          echo '{}' > /tmp/data/chain/chain-register.json
+          GLUE_HOME=/tmp/unpacked /tmp/artifact/glue-aarch64 \
+            --data-dir /tmp/data list-chains | tee /tmp/arm.log
+          grep -qi "registered chain" /tmp/arm.log

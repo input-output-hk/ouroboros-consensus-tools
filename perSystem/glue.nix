@@ -105,6 +105,32 @@
     beaconStatic =
       beaconProject.projectCross.musl64.hsPkgs.beacon.components.exes.beacon;
 
+    # -- aarch64-linux, cross-compiled from x86_64-linux -------------------
+    #
+    # consensus's flake does not declare aarch64-linux, so there is no
+    # legacyPackages.aarch64-linux to consume -- but that only rules out
+    # building *on* aarch64. Cross-compiling *to* it from x86_64-linux needs
+    # nothing from consensus's flake outputs, and since the musl payload is a
+    # from-source build either way, this costs no more than the native one.
+    #
+    # The artifact is therefore produced on x86_64-linux and exposed there;
+    # CI builds it in that job and smoke-tests it on an ARM runner.
+    crossAarch64 = "aarch64-multiplatform-musl";
+
+    dbAnalyserStaticAarch64 =
+      (consensusProject.projectVariants.noAsserts.appendModule {
+        modules = [staticLinkModule];
+      })
+      .projectCross.${
+        crossAarch64
+      }
+      .hsPkgs.ouroboros-consensus.components.exes.db-analyser;
+
+    beaconStaticAarch64 =
+      beaconProject.projectCross.${crossAarch64}.hsPkgs.beacon.components.exes.beacon;
+
+    pkgsAarch64Static = pkgs.pkgsCross.${crossAarch64}.pkgsStatic;
+
     # The cabal build plan db-analyser was built from. beacon reads
     # `<installPlanPath>/plan.json` to record which ouroboros-consensus /
     # ledger / plutus versions produced a measurement (mkManifest). Without
@@ -226,10 +252,17 @@
       curl,
       unzip,
       static,
+      # Probe a different binary for supported flags. Needed when the payload's
+      # own db-analyser is for another architecture and cannot be executed here.
+      capabilitiesFrom ? null,
     }: let
       provenanceFile =
         pkgs.writeText "provenance.json" (builtins.toJSON (mkProvenance static));
-      capabilities = mkCapabilities analyzerExe;
+      capabilities = mkCapabilities (
+        if capabilitiesFrom == null
+        then analyzerExe
+        else capabilitiesFrom
+      );
     in
       pkgs.stdenvNoCC.mkDerivation {
         inherit pname;
@@ -270,6 +303,19 @@
       analyzerExe = dbAnalyser;
       inherit (pkgs) jq time curl unzip;
       static = false;
+    };
+
+    payloadStaticAarch64 = mkPayload {
+      pname = "glue-payload-static-aarch64";
+      beaconExe = beaconStaticAarch64;
+      analyzerExe = dbAnalyserStaticAarch64;
+      inherit (pkgsAarch64Static) jq time curl unzip;
+      static = true;
+      # An aarch64 binary cannot be run on the x86_64 builder, so its flags
+      # cannot be probed by running --help. They come from the same
+      # db-analyser revision as the native build, so reuse that answer rather
+      # than inventing one.
+      capabilitiesFrom = dbAnalyserStatic;
     };
 
     payloadStatic = mkPayload {
@@ -313,6 +359,12 @@
         glue = mkSelfExtracting {
           payload = payloadStatic;
           name = "glue";
+        };
+
+        glue-payload-static-aarch64 = payloadStaticAarch64;
+        glue-aarch64-linux = mkSelfExtracting {
+          payload = payloadStaticAarch64;
+          name = "glue-aarch64-linux";
         };
         db-analyser-static = dbAnalyserStatic;
         beacon-static = beaconStatic;
