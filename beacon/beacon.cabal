@@ -73,10 +73,10 @@ executable beacon
     , base
     , base16-bytestring
     , bytestring
-    , cryptohash-sha256
     , cabal-plan
     , cardano-slotting
     , containers
+    , cryptohash-sha256
     , directory
     , extra
     , filepath
