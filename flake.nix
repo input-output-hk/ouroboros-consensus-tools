@@ -26,6 +26,14 @@
       url = "github:intersectmbo/cardano-haskell-packages?ref=repo";
       flake = false;
     };
+
+    # db-analyser, for the distributable `glue` payload (see perSystem/glue.nix).
+    #
+    # Deliberately given no `follows`: cache.iog.io serves exactly the
+    # derivations consensus builds against its *own* lock, so repointing its
+    # nixpkgs or haskell.nix at ours would change every derivation hash and
+    # turn a 45 MiB substitution into a source build of db-analyser.
+    ouroboros-consensus.url = "github:IntersectMBO/ouroboros-consensus";
   };
 
   outputs = inputs: let
