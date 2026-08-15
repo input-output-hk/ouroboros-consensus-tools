@@ -12,3 +12,9 @@ dist/
 
 # beacon default data directory
 beacon-data/
+
+# nix build result symlinks. Untracked files make the flake's git tree dirty,
+# which nix then records in the glue payload's provenance as a dirty source
+# revision -- and that revision is reported back with every benchmark.
+/result
+/result-*
