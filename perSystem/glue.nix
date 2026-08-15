@@ -40,6 +40,7 @@
     available = builtins.elem system consensusSystems;
 
     isLinux = pkgs.stdenv.hostPlatform.isLinux;
+    isDarwin = pkgs.stdenv.hostPlatform.isDarwin;
 
     # Static payloads are built for both Linux targets, but only ever
     # same-architecture: x86_64 -> x86_64-musl, aarch64 -> aarch64-musl.
@@ -345,20 +346,24 @@
     # NB: one `packages` attrset, merged before assignment. Two attrsets
     # combined with `//` would have the static side replace the whole
     # `packages` key rather than adding to it.
+    #
+    # Each attribute is exposed only where it can be evaluated, not merely
+    # where it can be built. Hydra evaluates the whole package set for every
+    # system, so an attribute that throws off-platform -- as mkRelocatable
+    # does on Linux -- fails evaluation for all of them.
     packages =
       lib.optionalAttrs available {
         glue-payload = payload;
         db-analyser = dbAnalyser;
-
+      }
+      // lib.optionalAttrs (available && isDarwin) {
         # The payload with every /nix/store library reference rewritten to be
         # relative to the binaries themselves, so the tree can be copied to a
-        # machine that has no store. Darwin only; Linux uses the static
-        # flavour instead, which needs no rewriting.
+        # machine that has no store. Darwin only: Linux uses the static
+        # flavour below, which needs no rewriting.
         glue-relocatable = mkRelocatable payload;
 
         # The artifact people actually download: one executable file.
-        # On darwin that wraps the relocated tree; on Linux the static one,
-        # which needs no relocation at all (see below).
         glue = mkSelfExtracting {
           payload = mkRelocatable payload;
           name = "glue";
@@ -366,16 +371,15 @@
       }
       // lib.optionalAttrs staticAvailable {
         glue-payload-static = payloadStatic;
+        db-analyser-static = dbAnalyserStatic;
+        beacon-static = beaconStatic;
 
-        # Linux's single-file artifact. Overrides the darwin-oriented `glue`
-        # above, because a statically linked payload is already relocatable.
+        # Linux's single-file artifact, wrapping the static payload: already
+        # relocatable, so nothing to rewrite.
         glue = mkSelfExtracting {
           payload = payloadStatic;
           name = "glue";
         };
-
-        db-analyser-static = dbAnalyserStatic;
-        beacon-static = beaconStatic;
       };
   };
 }
