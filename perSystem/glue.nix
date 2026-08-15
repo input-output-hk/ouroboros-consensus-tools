@@ -68,6 +68,15 @@
     # freetype, pixman and X11 into a distributable that never draws a plot,
     # and stands in the way of linking it statically for Linux.
     beaconProject = hsPkgs.beacon.project.appendModule {
+      # Set through cabalProjectLocal, not only as a module flag. A module
+      # flag changes how the component is configured but not the solved cabal
+      # plan, so Chart-cairo stayed a planned dependency and was built anyway
+      # -- pulling in cairo and glib. Harmless waste on x86_64; fatal on
+      # aarch64-musl, where static glib fails to build at all.
+      cabalProjectLocal = ''
+        package beacon
+          flags: -plots
+      '';
       modules = [{packages.beacon.flags.plots = false;}];
     };
 
