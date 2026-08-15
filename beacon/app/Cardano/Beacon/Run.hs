@@ -9,6 +9,7 @@ module Cardano.Beacon.Run (
   , envBeaconDir
   , envEchoing
   , envEmpty
+  , envTool
   , shellCurlGitHubAPI
   , shellMergeMetaAndData
   , shellNixBuildVersion
