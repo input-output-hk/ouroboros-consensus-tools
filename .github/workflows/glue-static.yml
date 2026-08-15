@@ -100,6 +100,43 @@ jobs:
             /tmp/moved/bin/beacon --data-dir /tmp/static-data build | tee /tmp/static.log
           grep -q "using bundled binary" /tmp/static.log
 
+      # The artifact an SPO actually downloads. Building only the payload left
+      # the single file -- its shell header, the archive offset arithmetic, the
+      # cache-reuse path -- exercised on no platform it ships to.
+      - name: Build and exercise the single-file artifact
+        run: |
+          set -euo pipefail
+          nix build .#glue --print-build-logs -o /tmp/glue-exe
+          cp -L /tmp/glue-exe "/tmp/glue-x86_64-linux"
+          chmod +x "/tmp/glue-x86_64-linux"
+          echo "artifact size: $(stat -c%s "/tmp/glue-x86_64-linux" | numfmt --to=iec)"
+
+          mkdir -p /tmp/data/chain
+          echo '{}' > /tmp/data/chain/chain-register.json
+
+          # First run unpacks; second must reuse the cache rather than redo it.
+          env -i PATH=/usr/bin:/bin HOME=/tmp GLUE_HOME=/tmp/glue-home \
+            "/tmp/glue-x86_64-linux" --data-dir /tmp/data list-chains > /tmp/first.log 2>&1
+          grep -qi "registered chain" /tmp/first.log
+          test -f /tmp/glue-home/*/.complete
+
+          stamp=$(find /tmp/glue-home -name .complete -newermt '@0' -printf '%T@\n')
+          env -i PATH=/usr/bin:/bin HOME=/tmp GLUE_HOME=/tmp/glue-home \
+            "/tmp/glue-x86_64-linux" --data-dir /tmp/data list-chains > /tmp/second.log 2>&1
+          grep -qi "registered chain" /tmp/second.log
+          test "$stamp" = "$(find /tmp/glue-home -name .complete -printf '%T@\n')"
+
+          sha256sum "/tmp/glue-x86_64-linux" | tee "/tmp/glue-x86_64-linux.sha256"
+
+      - name: Upload the artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: glue-x86_64-linux
+          path: |
+            /tmp/glue-x86_64-linux
+            /tmp/glue-x86_64-linux.sha256
+          retention-days: 14
+
   # aarch64-linux builds natively on an ARM runner rather than being
   # cross-compiled from x86_64. Cross-*architecture* is not merely slower: the
   # Template Haskell splices haskell.nix evaluates through
@@ -163,3 +200,40 @@ jobs:
           env -i PATH=/usr/bin:/bin HOME=/tmp \
             /tmp/moved/bin/beacon --data-dir /tmp/data list-chains | tee /tmp/arm.log
           grep -qi "registered chain" /tmp/arm.log
+
+      # The artifact an SPO actually downloads. Building only the payload left
+      # the single file -- its shell header, the archive offset arithmetic, the
+      # cache-reuse path -- exercised on no platform it ships to.
+      - name: Build and exercise the single-file artifact
+        run: |
+          set -euo pipefail
+          nix build .#glue --print-build-logs -o /tmp/glue-exe
+          cp -L /tmp/glue-exe "/tmp/glue-aarch64-linux"
+          chmod +x "/tmp/glue-aarch64-linux"
+          echo "artifact size: $(stat -c%s "/tmp/glue-aarch64-linux" | numfmt --to=iec)"
+
+          mkdir -p /tmp/data/chain
+          echo '{}' > /tmp/data/chain/chain-register.json
+
+          # First run unpacks; second must reuse the cache rather than redo it.
+          env -i PATH=/usr/bin:/bin HOME=/tmp GLUE_HOME=/tmp/glue-home \
+            "/tmp/glue-aarch64-linux" --data-dir /tmp/data list-chains > /tmp/first.log 2>&1
+          grep -qi "registered chain" /tmp/first.log
+          test -f /tmp/glue-home/*/.complete
+
+          stamp=$(find /tmp/glue-home -name .complete -newermt '@0' -printf '%T@\n')
+          env -i PATH=/usr/bin:/bin HOME=/tmp GLUE_HOME=/tmp/glue-home \
+            "/tmp/glue-aarch64-linux" --data-dir /tmp/data list-chains > /tmp/second.log 2>&1
+          grep -qi "registered chain" /tmp/second.log
+          test "$stamp" = "$(find /tmp/glue-home -name .complete -printf '%T@\n')"
+
+          sha256sum "/tmp/glue-aarch64-linux" | tee "/tmp/glue-aarch64-linux.sha256"
+
+      - name: Upload the artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: glue-aarch64-linux
+          path: |
+            /tmp/glue-aarch64-linux
+            /tmp/glue-aarch64-linux.sha256
+          retention-days: 14
