@@ -159,8 +159,10 @@
     # The native plan is used for both flavours: cross-compiling to musl does
     # not change the versions of the packages named in the manifest, which is
     # all beacon reads out of it.
-    planNix =
-      consensus.legacyPackages.${system}.hsPkgs.ouroboros-consensus.project.plan-nix;
+    # Taken from whichever project was selected above, rather than reaching
+    # into legacyPackages again: that attribute does not exist on
+    # aarch64-linux, which is the whole reason the from-source project exists.
+    planNix = consensusProject.plan-nix;
 
     # nix gives us lastModifiedDate as "YYYYMMDDhhmmss"; beacon's CommitInfo
     # parses ciCommitDate as a UTCTime, so hand it ISO 8601.
