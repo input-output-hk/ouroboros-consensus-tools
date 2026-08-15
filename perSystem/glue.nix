@@ -281,6 +281,7 @@
     };
 
     inherit (import ../nix/relocate.nix {inherit pkgs lib;}) mkRelocatable;
+    inherit (import ../nix/selfextract.nix {inherit pkgs lib;}) mkSelfExtracting;
   in {
     # NB: one `packages` attrset, merged before assignment. Two attrsets
     # combined with `//` would have the static side replace the whole
@@ -295,9 +296,24 @@
         # machine that has no store. Darwin only; Linux uses the static
         # flavour instead, which needs no rewriting.
         glue-relocatable = mkRelocatable payload;
+
+        # The artifact people actually download: one executable file.
+        # On darwin that wraps the relocated tree; on Linux the static one,
+        # which needs no relocation at all (see below).
+        glue = mkSelfExtracting {
+          payload = mkRelocatable payload;
+          name = "glue";
+        };
       }
       // lib.optionalAttrs staticAvailable {
         glue-payload-static = payloadStatic;
+
+        # Linux's single-file artifact. Overrides the darwin-oriented `glue`
+        # above, because a statically linked payload is already relocatable.
+        glue = mkSelfExtracting {
+          payload = payloadStatic;
+          name = "glue";
+        };
         db-analyser-static = dbAnalyserStatic;
         beacon-static = beaconStatic;
       };
