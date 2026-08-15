@@ -163,7 +163,7 @@ jobs:
       - name: Report payload size
         if: matrix.payload
         run: |
-          echo "closure: $(nix path-info -Sh .#glue-payload | awk '{print $NF}')"
+          echo "closure: $(nix path-info -Sh .#glue-payload | awk '{$1=""; print}')"
           ls -lh /tmp/glue-payload/bin/
 
       # Not `continue-on-error` on the whole job: this step is expected to
@@ -185,12 +185,12 @@ jobs:
   # dependency tree from source. Hence its own job, and continue-on-error until
   # it is reliable: it must not gate ordinary PRs while being iterated on.
   #
-  # TODO: add a binary cache (cachix) so this cost is paid once rather than per
-  # run, then drop continue-on-error and fold it into the matrix above.
+  # A binary cache (cachix) would still be worth having so this cost is paid
+  # once rather than per cold runner, but it is no longer a prerequisite: the
+  # build reaches the linker in well under an hour.
   static:
     name: Static musl payload (x86_64-linux)
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 350
 
     steps:
