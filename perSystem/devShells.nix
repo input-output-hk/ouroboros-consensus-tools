@@ -9,10 +9,10 @@
 
       nativeBuildInputs = [
         pkgs.alejandra
-        pkgs.cairo
+        pkgs.gnuplot
+        pkgs.haskellPackages.cabal-fmt
         pkgs.jq
         pkgs.gh
-        pkgs.pkg-config
         pkgs.time
       ];
 

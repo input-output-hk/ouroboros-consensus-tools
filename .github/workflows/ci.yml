@@ -26,6 +26,7 @@ jobs:
         cabal: [&cabal-version "3.16"]
         sys:
           - { os: ubuntu-latest, shell: bash }
+          - { os: macos-latest, shell: bash }
     defaults:
       run:
         shell: ${{ matrix.sys.shell }}
@@ -36,10 +37,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install dependency libs and headers
-        run: |
-          sudo apt-get install -y --no-install-recommends libcairo2-dev
 
       - name: Install base libraries
         uses: input-output-hk/actions/base@latest
@@ -56,6 +53,12 @@ jobs:
       - name: Update Cabal (Hackage and CHaP)
         run: |
           cabal clean
+          cabal update
+          # Some runners (observed on macos-latest) report success here but
+          # leave the hackage.haskell.org index-state stuck on a stale
+          # snapshot, causing the next step to fail demanding a newer one
+          # (a known cabal-install bug, e.g. haskell/cabal#9796). Running
+          # update a second time reliably clears it up.
           cabal update
 
       # We create a `dependencies.txt` file that can be used to index the cabal

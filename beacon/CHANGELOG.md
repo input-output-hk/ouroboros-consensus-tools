@@ -1,5 +1,10 @@
 # Beacon Changelog
 
+## 0.4.0.0 -- 2026-08-18
+
+* Removed Cairo-based plotting in favour of an internal fork of `easyplot` (a gnuplot wrapper), reducing build size and dependency footprint as well as improving portability.
+* Fix `--heap-limit`/`--mem-limit` rejecting valid values >= 1000M
+
 ## 0.3.0.0 -- 2026-07-28
 
 * Added a memory-limiting feature for `beacon run`, letting on-disk backend benchmarks be run under realistic memory pressure.

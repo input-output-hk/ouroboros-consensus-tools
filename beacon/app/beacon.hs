@@ -29,8 +29,9 @@
 --    accumulate side by side. Invoked automatically by @run@.
 --
 -- 4. @summary@ \/ @compare@ \/ @variance@ -- report on the stored run(s) of
---    one or two slugs, as text and Cairo-rendered plots. For @compare@, the
---    first slug given is treated as the "baseline" (see 'compareMeasurements').
+--    one or two slugs, as text and gnuplot-rendered plots (see
+--    'Cardano.Beacon.Compare.probeGnuplot'). For @compare@, the first slug
+--    given is treated as the "baseline" (see 'compareMeasurements').
 --
 -- * Analysis
 --
@@ -48,7 +49,6 @@
 -- * Next up:
 --
 -- - [ ] Create a markdown or typst report.
--- - [ ] Drop less portable Cairo rendering in favour of easyplot, or inline gnuplot inside typst.
 -- - [ ] Produce an error that can be reacted to if the metrics filter (thresholed, e.g.) is violated.
 -- - [ ] Allow to configure metrics filtering (eg "lower is better", pretty name, etc).
 -- - [ ] Perform a statistical analysis on the measurements / wire up CDF.hs.
