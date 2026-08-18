@@ -40,8 +40,13 @@ data BeaconChain = BeaconChain {
 instance FromJSON BeaconChain where
   parseJSON = genericParseJSON aesonNoTagFields
 
+-- Needed so 'Cardano.Beacon.Fetch' can write the chain register itself,
+-- rather than shelling out to jq to merge it as the import script did.
+instance ToJSON BeaconChain where
+  toJSON = genericToJSON aesonNoTagFields
+
 newtype Chains = Chains {unChains :: Map ChainName BeaconChain}
-        deriving (Show, FromJSON)
+        deriving (Show, FromJSON, ToJSON)
           via Map ChainName BeaconChain
 
 

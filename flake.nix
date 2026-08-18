@@ -26,6 +26,14 @@
       url = "github:intersectmbo/cardano-haskell-packages?ref=repo";
       flake = false;
     };
+
+    # db-analyser, for the distributable `glue` payload (see perSystem/glue.nix).
+    #
+    # Deliberately given no `follows`: cache.iog.io serves exactly the
+    # derivations consensus builds against its *own* lock, so repointing its
+    # nixpkgs or haskell.nix at ours would change every derivation hash and
+    # turn a 45 MiB substitution into a source build of db-analyser.
+    ouroboros-consensus.url = "github:IntersectMBO/ouroboros-consensus";
   };
 
   outputs = inputs: let
@@ -42,7 +50,16 @@
         _module.args.pkgs = import inputs.nixpkgs {
           inherit system;
           inherit (inputs.haskellNix) config;
-          overlays = [inputs.haskellNix.overlay];
+          # Same overlay stack consensus itself uses. Needed because the
+          # aarch64 static payload instantiates consensus's project from
+          # source, and its crypto dependencies resolve libblst, libsodium-vrf
+          # and secp256k1 through pkg-config -- which only these overlays
+          # populate.
+          overlays = [
+            inputs.iohkNix.overlays.crypto
+            inputs.haskellNix.overlay
+            inputs.iohkNix.overlays.haskell-nix-crypto
+          ];
         };
       };
     };

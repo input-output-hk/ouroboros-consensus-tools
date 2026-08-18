@@ -9,6 +9,7 @@ module Cardano.Beacon.Run (
   , envBeaconDir
   , envEchoing
   , envEmpty
+  , envTool
   , shellCurlGitHubAPI
   , shellMergeMetaAndData
   , shellNixBuildVersion
@@ -19,6 +20,7 @@ import           Cardano.Beacon.Chain
 import           Cardano.Beacon.CLI (ApplyMode (..), Backend (..),
                      BeaconOptions (..), backendCLIOpts)
 import           Cardano.Beacon.Console
+import           Cardano.Beacon.Provenance (Provenance, provenanceTool)
 import           Cardano.Beacon.Types
 import           Control.Exception (SomeException (..), finally, try)
 import           Control.Monad (void, when)
@@ -26,7 +28,7 @@ import           Data.ByteString.Char8 as BSC (ByteString, pack, readFile,
                      unpack, writeFile)
 import           Data.Char (isSpace)
 import           Data.List (dropWhileEnd, isInfixOf, isPrefixOf)
-import           Data.Maybe (fromJust, isJust, listToMaybe)
+import           Data.Maybe (fromJust, fromMaybe, isJust, listToMaybe)
 import           System.Directory (createDirectoryIfMissing, doesFileExist,
                      findExecutable, removeFile)
 import           System.FilePath ((<.>), (</>))
@@ -39,6 +41,13 @@ data RunEnvironment = Env
   , runCommit       :: Maybe CommitInfo
   , runInstall      :: Maybe InstallInfo
   , runCapabilities :: Maybe EnvironmentCapabilities
+  , runProvenance   :: Maybe Provenance
+    -- ^ Set when beacon is running from a distributable payload (see
+    -- "Cardano.Beacon.Provenance"). When present, db-analyser and its commit
+    -- metadata come from the payload rather than from @nix build@ and the
+    -- GitHub API -- which is what lets a run happen with no nix and no
+    -- network. 'Nothing' in an ordinary development checkout, where beacon
+    -- behaves exactly as before.
   , runOptions      :: BeaconOptions
   }
 
@@ -49,7 +58,14 @@ envBeaconDir :: RunEnvironment -> FilePath
 envBeaconDir = optBeaconDir . runOptions
 
 envEmpty :: BeaconOptions -> RunEnvironment
-envEmpty = Env Nothing Nothing Nothing Nothing
+envEmpty = Env Nothing Nothing Nothing Nothing Nothing
+
+-- | Path to a helper executable, preferring one bundled in the payload over
+-- whatever @PATH@ offers. In a development checkout there is no payload, so
+-- this is just the bare name and resolution falls to @PATH@ as before.
+envTool :: RunEnvironment -> String -> FilePath
+envTool env name =
+  fromMaybe name (runProvenance env >>= \p -> provenanceTool p name)
 
 
 -- All commands are currently passed to the shell verbatim, unescaped.
@@ -162,7 +178,7 @@ shellRunDbAnalyser env applMode backend memLimitOpts BeaconChain{..} outFile = d
       \unconstrained."
 
   processStats <- runDbAnalyser dbAnalyser (dbAnalyserArgs <> onlyImmutableFlag <> lsmNoCacheFlag)
-  callJQ echoing outFile jqToListArgs
+  callJQ (envTool env "jq") echoing outFile jqToListArgs
   removeFile tempResult
   pure processStats
   where
@@ -265,7 +281,11 @@ detectEnvironmentCapabilities env@Env{ runInstall = Just install } = do
 -- without I/O/RSS metrics rather than failing the run.
 probeTimeVerbose :: RunEnvironment -> IO (Maybe FilePath)
 probeTimeVerbose env = do
-  mPath <- findExecutable "time"
+  -- A bundled GNU time is always preferred: the host's may be a BSD or
+  -- busybox build with no -v/-o, which costs the run its memory/IO metrics.
+  mPath <- case runProvenance env >>= \p -> provenanceTool p "time" of
+    Just bundled -> pure (Just bundled)
+    Nothing      -> findExecutable "time"
   case mPath of
     Nothing   -> unavailable "no 'time' binary found on PATH"
     Just path -> probe path `finally` cleanupProbeFile
@@ -342,7 +362,7 @@ parseTimeVerboseReport report =
 
 shellMergeMetaAndData :: RunEnvironment -> FilePath -> FilePath -> Maybe FilePath -> FilePath -> IO ()
 shellMergeMetaAndData env srcMeta srcData mSrcStats dest =
-  callJQ (envEchoing env) dest $ case mSrcStats of
+  callJQ (envTool env "jq") (envEchoing env) dest $ case mSrcStats of
     Nothing ->
       [ "-M"
       , "'{\"meta\": $meta[0], \"data\": $data[0]}'"
@@ -359,7 +379,7 @@ shellMergeMetaAndData env srcMeta srcData mSrcStats dest =
       , "--null-input"
       ]
 
-callJQ :: EchoCommand -> FilePath -> [String] -> IO ()
-callJQ echoing dest jqArgs = do
-  out <- BSC.pack <$> runShellEchoing echoing "jq" jqArgs
+callJQ :: FilePath -> EchoCommand -> FilePath -> [String] -> IO ()
+callJQ jqExe echoing dest jqArgs = do
+  out <- BSC.pack <$> runShellEchoing echoing jqExe jqArgs
   BSC.writeFile dest out

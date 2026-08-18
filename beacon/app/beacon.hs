@@ -58,17 +58,22 @@ module Main (main) where
 
 import           Cabal.Plan (PkgId (..), PkgName (..), PlanJson (..), Unit (..),
                      decodePlanJson)
+import           Cardano.Beacon.Benchmark
 import           Cardano.Beacon.Chain
 import           Cardano.Beacon.CLI
 import           Cardano.Beacon.Compare
 import           Cardano.Beacon.Console
+import           Cardano.Beacon.Fetch
+import           Cardano.Beacon.Provenance
+import           Cardano.Beacon.Report
 import           Cardano.Beacon.Run
 import           Cardano.Beacon.RunMeta
+import           Cardano.Beacon.SysInfo
 import           Cardano.Beacon.Types
 import           Control.Concurrent (threadDelay)
 import           Control.Exception (SomeException, bracket_, catchJust,
                      displayException, try)
-import           Control.Monad (foldM_, forM_, unless, when)
+import           Control.Monad (foldM, foldM_, forM_, unless, when)
 import           Control.Monad.Extra (ifM)
 import           Data.Aeson (eitherDecodeFileStrict, eitherDecodeStrict',
                      encodeFile)
@@ -78,6 +83,7 @@ import qualified Data.Map as Map
 import           Data.Maybe (fromJust, fromMaybe, listToMaybe, mapMaybe)
 import           Data.Monoid
 import           Data.Ord (Down (..))
+import qualified Data.Text as T
 import           Data.Time.Clock (getCurrentTime)
 import           Data.Traversable (for)
 import           Data.Version (showVersion)
@@ -86,7 +92,7 @@ import qualified Paths_beacon as Paths (version)
 import           System.Directory
 import           System.Environment (getExecutablePath)
 import           System.FilePath
-import           System.IO (hClose, hPutStr)
+import           System.IO (hClose, hPutStr, hSetEncoding, stderr, stdout, utf8)
 import           System.IO.Error (isAlreadyExistsError, isDoesNotExistError)
 import           System.Posix.Files (stdFileMode)
 import           System.Posix.IO (OpenFileFlags (creat, exclusive),
@@ -102,18 +108,128 @@ import           Validation (Validation (..))
 
 main :: IO ()
 main = do
+  -- Without this, beacon dies on its own banner in any environment that has
+  -- no locale set -- cron, a systemd unit, a container, `env -i`. GHC then
+  -- picks ASCII for stdout and the box-drawing characters in 'appHeader'
+  -- raise "commitBuffer: invalid argument (cannot encode character)".
+  -- A distributable is run in exactly those environments, so the encoding
+  -- cannot be left to the host.
+  hSetEncoding stdout utf8
+  hSetEncoding stderr utf8
+
   putStrLn appHeader
   (options, commands) <- getOpts
 
   hostName <-
     let machId = optMachineId options
     in if null machId then getHostName else pure machId
-  let env = envEmpty options { optMachineId = hostName }
+  -- A payload build ships db-analyser and its metadata alongside us; an
+  -- ordinary checkout does not, and keeps the nix/GitHub path.
+  provenance <- loadPayloadProvenance
+  let env = (envEmpty options { optMachineId = hostName })
+              { runProvenance = provenance }
+
+  commands' <- traverse (resolveVersion provenance) commands
+
+  when (any isBenchmark commands') $
+    createDirectoryIfMissing True (optBeaconDir options </> "chain")
 
   ifM (doesDirectoryExist $ optBeaconDir options)
-    (runCommands env commands)
+    (runCommands env commands')
     (printFatalAndDie $ "beacon data directory missing: " ++ optBeaconDir options)
 
+
+-- | Acquire the fragment to benchmark, if this build knows where to get one.
+--
+-- Only distributable builds carry a chain manifest; a development checkout has
+-- none, and its chains are managed by hand as before. Downloading is therefore
+-- something the SPO-facing path does and the developer path never does.
+-- | Say out loud what the disk is, since it decides how to read the numbers.
+describeSystem :: SysInfo -> IO ()
+describeSystem SysInfo{siCpuModel, siCpuCores, siMemTotalKb, siDataDisk} = do
+  printStyled StyleInfo $ "cpu:  " ++ maybe "unknown" id siCpuModel
+    ++ maybe "" (\n -> " (" ++ show n ++ " logical)") siCpuCores
+  printStyled StyleInfo $ "ram:  "
+    ++ maybe "unknown" (\kb -> show (kb `div` 1024 `div` 1024) ++ " GiB") siMemTotalKb
+  case siDataDisk of
+    Nothing -> pure ()
+    Just DiskInfo{diDevice, diModel, diRotational, diFilesystem} -> do
+      printStyled StyleInfo $ "disk: " ++ maybe "unknown" id diDevice
+        ++ maybe "" (" " ++) diModel
+        ++ maybe "" (\fs -> " [" ++ fs ++ "]") diFilesystem
+      case diRotational of
+        Just True -> printStyled StyleWarning
+          "the data directory is on a rotating disk; the on-disk figures will \
+          \not be representative of an SSD-backed node"
+        _ -> pure ()
+
+fetchIfNeeded :: RunEnvironment -> Maybe ChainName -> IO ()
+fetchIfNeeded env mChain =
+  case runProvenance env of
+    Nothing   -> pure ()
+    Just prov -> do
+      let manifestPath = provShareDir prov </> "chain-manifest.json"
+      loadManifest manifestPath >>= \case
+        Nothing -> pure ()
+        Just manifest ->
+          case manifestChain manifest mChain of
+            Left err -> printFatalAndDie err
+            Right mc ->
+              ensureChain
+                (envTool env "curl")
+                (envTool env "unzip")
+                (envBeaconDir env </> "chain")
+                (cmBaseUrl manifest)
+                mc
+
+isBenchmark :: BeaconCommand -> Bool
+isBenchmark BeaconBenchmark{} = True
+isBenchmark _                 = False
+
+-- | Fill in a 'Version' the user did not fully specify.
+--
+-- A build that bundles its own db-analyser knows both the revision and the
+-- compiler, so requiring the user to repeat them is ceremony: the only two
+-- possible outcomes are agreement or refusal. A checkout has nothing to
+-- default to, so there --rev stays mandatory.
+--
+-- This is the single place where the "" placeholders produced by
+-- 'Cardano.Beacon.CLI.parseRevision' / 'parseGHCVersion' are eliminated;
+-- nothing downstream ever sees one.
+resolveVersion :: Maybe Provenance -> BeaconCommand -> IO BeaconCommand
+resolveVersion mProv = \case
+    BeaconBuild ver              -> BeaconBuild <$> fill ver
+    BeaconDoRun c ver n a b m    -> (\v -> BeaconDoRun c v n a b m) <$> fill ver
+    BeaconBenchmark c ver n      -> (\v -> BeaconBenchmark c v n) <$> fill ver
+    cmd                          -> pure cmd
+  where
+    fill ver = do
+      gitRef   <- resolveRef (verGitRef ver)
+      compiler <- resolveCompiler (verCompiler ver)
+      pure ver { verGitRef = gitRef, verCompiler = compiler }
+
+    resolveRef ref
+      | not (null ref) = pure ref
+      | otherwise = case mProv of
+          Just prov -> pure $ ciCommitSHA1 (provenanceCommitInfo prov)
+          Nothing   -> printFatalAndDie
+            "--rev is required: this build does not bundle a db-analyser to \
+            \default to."
+
+    -- Unlike the revision, a mismatched compiler is refused here rather than
+    -- later: it never reaches the GitHub lookup that catches a bad --rev, and
+    -- silently benchmarking one compiler while labelling the run with another
+    -- would corrupt the run's slug and its stored metadata.
+    resolveCompiler comp = case (null comp, mProv) of
+      (True,  Just prov) -> pure $ apCompiler (provAnalyzer prov)
+      (True,  Nothing)   -> pure defaultCompiler
+      (False, Just prov)
+        | comp /= apCompiler (provAnalyzer prov) -> printFatalAndDie $
+            "this build's db-analyser was compiled with "
+            ++ apCompiler (provAnalyzer prov) ++ ", not " ++ comp ++ "."
+      (False, _)         -> pure comp
+
+    defaultCompiler = "haskell96"
 
 -- constants
 
@@ -229,6 +345,24 @@ runCommand env BeaconLoadChains =
 -- That's way we cache such resolutions locally so repeat runs against
 -- an already-built revision don't need GitHub at all; a mutable ref (branch/tag name)
 -- is always resolved live, since only an immutable SHA is safe to reuse indefinitely.
+-- With a payload, the commit is already known: it was resolved when the
+-- payload was built and frozen into share/provenance.json. Asking GitHub
+-- again would be both pointless and impossible offline.
+runCommand env@Env{ runProvenance = Just prov } (BeaconLoadCommit ref) = do
+  let ci  = provenanceCommitInfo prov
+      sha = ciCommitSHA1 ci
+  -- Refuse rather than silently benchmark something other than what was
+  -- asked for: a payload contains exactly one db-analyser and cannot honour
+  -- a different --rev.
+  unless (null ref || ref `isPrefixOf` sha) $
+    printFatalAndDie $ unlines
+      [ "this build has a pinned db-analyser (" ++ sha ++ "),"
+      , "so it cannot benchmark the requested revision '" ++ ref ++ "'."
+      , "Use a beacon built from a checkout to target arbitrary revisions."
+      ]
+  printStyled StyleInfo $ "using db-analyser pinned in this build: " ++ sha
+  pure env{ runCommit = Just ci }
+
 runCommand env (BeaconLoadCommit ref) = do
   cacheHit <- if isHexRef ref then lookupRevCache else pure Nothing
   case cacheHit of
@@ -290,11 +424,105 @@ runCommand env (BeaconLoadCommit ref) = do
 runCommand env@Env{ runCommit = Nothing } cmd@(BeaconBuild ver) = do
   env' <- runCommand env (BeaconLoadCommit $ verGitRef ver)
   runCommand env' cmd
+
+-- Nothing to build: the payload already carries db-analyser and the build
+-- plan it was produced from.
+runCommand env@Env{ runProvenance = Just prov } (BeaconBuild _ver) = do
+  let install = provenanceInstallInfo prov
+      exe     = installExePath install
+  exists <- doesFileExist exe
+  unless exists $
+    printFatalAndDie $ "payload is missing its db-analyser at '" ++ exe ++ "'"
+  printStyled StyleNone $ "using bundled binary: " ++ exe
+  pure env { runInstall = Just install }
+
 runCommand env (BeaconBuild ver) = do
   install <- shellNixBuildVersion env ver
   printStyled StyleNone $ "installed binary is: " ++ installExePath install
   printStyled StyleNone $ "build plan is available in: " ++ installPlanPath install
   pure env { runInstall = Just install }
+
+-- The SPO-facing entry point. Expands into the same runs a developer would
+-- have typed, then summarizes each. Needs an install and capabilities first,
+-- so it leans on the existing BeaconBuild path rather than duplicating it.
+runCommand env@Env{ runInstall = Nothing } cmd@BeaconBenchmark{} = do
+  let BeaconBenchmark _ ver _ = cmd
+  env' <- runCommand env (BeaconBuild ver)
+  runCommand env' cmd
+runCommand env@Env{ runInstall = Just{}, runCapabilities = Nothing } cmd@BeaconBenchmark{} = do
+  caps <- detectEnvironmentCapabilities env
+  runCommand env { runCapabilities = Just caps } cmd
+runCommand env@Env{ runChains = Nothing } cmd@BeaconBenchmark{} = do
+  let BeaconBenchmark mChain _ _ = cmd
+  fetchIfNeeded env mChain
+  env' <- runCommand env BeaconLoadChains
+  runCommand env' cmd
+runCommand env@Env{..} (BeaconBenchmark mChain ver count) = do
+  chains <- maybe (printFatalAndDie "no chains registered") pure runChains
+
+  chain <- case mChain of
+    Just name
+      | Nothing <- lookupChain name chains ->
+          printFatalAndDie $ "requested chain " ++ show name ++ " is not registered"
+      | otherwise -> pure name
+    -- With exactly one registered chain there is nothing to choose; asking
+    -- an SPO to name it would be ceremony.
+    Nothing -> case Map.keys (unChains chains) of
+      [only] -> do
+        printStyled StyleInfo $ "benchmarking the only registered chain: " ++ show only
+        pure only
+      []     -> printFatalAndDie
+        "no chains registered: nothing to benchmark"
+      many   -> printFatalAndDie $
+        "several chains are registered; pick one with -n: "
+        ++ intercalate ", " [T.unpack n | ChainName n <- many]
+
+  let caps        = fromJust runCapabilities
+      commit      = fromJust runCommit
+      BenchmarkPlan{bpRuns, bpSkipped} =
+        benchmarkPlan caps commit ver chain count
+
+  forM_ bpSkipped $ \reason ->
+    printStyled StyleWarning $ "skipping " ++ reason
+
+  when (null bpRuns) $
+    printFatalAndDie "no benchmark configurations are supported by this build"
+
+  printStyled StyleInfo $
+    "benchmarking " ++ show chain ++ " in " ++ show (length bpRuns) ++ " configurations"
+
+  env' <- foldM runPlanned env bpRuns
+
+  printStyled StyleInfo "all configurations complete; summaries follow"
+  env'' <- foldM summarizePlanned env' bpRuns
+
+  -- The measurements are only interpretable alongside the machine that
+  -- produced them; the on-disk configurations in particular mean nothing
+  -- without knowing what the disk is.
+  sysInfo <- collectSysInfo (envBeaconDir env)
+  describeSystem sysInfo
+
+  reportPath <- writeReport
+    (envBeaconDir env)
+    (optMachineId runOptions)
+    ((</> "provenance.json") . provShareDir <$> runProvenance)
+    sysInfo
+    (map prSlug bpRuns)
+
+  printStyled StyleInfo $ "report written to " ++ reportPath
+  printStyled StyleNone $
+    "Send this single file back to the Leios team; it contains the \
+    \measurements, the machine they were taken on, and the exact \
+    \db-analyser build that took them."
+  pure env''
+  where
+    runPlanned e PlannedRun{prLabel, prCommand} = do
+      printStyled StyleInfo $ "=== " ++ prLabel ++ " ==="
+      runCommand e prCommand
+
+    summarizePlanned e PlannedRun{prLabel, prSlug} = do
+      printStyled StyleInfo $ "=== summary: " ++ prLabel ++ " ==="
+      runCommand e (BeaconSummary prSlug)
 
 runCommand env@Env{ runChains = Nothing } cmd@(BeaconDoRun bChain _ _ _ _ _) = do
   env' <- runCommand env BeaconLoadChains
