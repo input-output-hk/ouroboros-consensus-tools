@@ -14,6 +14,7 @@ module Cardano.Beacon.Compare (
 
 import           Cardano.Beacon.Chain
 import           Cardano.Beacon.Console
+import           Cardano.Beacon.Plot (plotSeries)
 import           Cardano.Beacon.RunMeta
 import           Cardano.Beacon.SlotDataPoint
 import           Cardano.Beacon.Types
@@ -28,9 +29,6 @@ import           Data.Vector (Vector)
 import qualified Data.Vector as V
 import           Data.Vector.Algorithms.Merge (sortBy)
 import           Data.Word (Word64)
-import qualified Graphics.Rendering.Chart.Backend.Cairo as Chart.Cairo
-import           Graphics.Rendering.Chart.Easy ((.=))
-import qualified Graphics.Rendering.Chart.Easy as Chart
 import           Numeric
 import           Prelude hiding (putStr, putStrLn)
 import qualified Statistics.Function as Stat
@@ -479,20 +477,12 @@ plotMeasurements ::
   -> BeaconRun
   -> FilePath
   -> IO ()
-plotMeasurements (ChartTitle title) selector mExcludedSlots runA runB outfile = do
-    let slotXvalue run = V.toList
-                       $ V.filter (notExcluded mExcludedSlots . fst)
-                       $ V.zip (run .> selSlot) (run .> selector)
-        slotXvalueA = slotXvalue runA
-        slotXvalueB = slotXvalue runB
-    Chart.Cairo.toFile Chart.def outfile $ do
-      Chart.layout_title .= title
-      Chart.setColors [Chart.opaque Chart.blue, Chart.opaque Chart.red]
-      Chart.plot (Chart.points (toSlug $ rMeta runA) slotXvalueA)
-      Chart.plot (Chart.points (toSlug $ rMeta runB) slotXvalueB)
-  where
-    notExcluded Nothing      _ = True
-    notExcluded (Just slots) s = s `Set.notMember` slots
+plotMeasurements (ChartTitle title) selector mExcludedSlots runA runB outfile =
+    plotSeries title
+      [ (toSlug (rMeta runA), valuesBySlot selector mExcludedSlots runA)
+      , (toSlug (rMeta runB), valuesBySlot selector mExcludedSlots runB)
+      ]
+      outfile
 
 plotMeasurements' ::
      [BeaconRun]
@@ -504,29 +494,22 @@ plotMeasurements' ::
   -> FilePath
   -> IO ()
 plotMeasurements' runs (ChartTitle title) selector mExcludedSlots outfile =
-  Chart.Cairo.toFile Chart.def outfile $ do
-    Chart.layout_title .= title
-    Chart.setColors
-      [ Chart.opaque Chart.blue
-      , Chart.opaque Chart.red
-      , Chart.opaque Chart.green
-      , Chart.opaque Chart.magenta
-      , Chart.opaque Chart.cyan
+    plotSeries title
+      [ ("run " ++ show ix, valuesBySlot selector mExcludedSlots run)
+      | (run, ix) <- zip runs [1 :: Int ..]
       ]
-    mapM_ Chart.plot
-      [ Chart.points name points
-        | (run, ix) <- zip runs [1 :: Int ..]
-          , let name    = "run " ++ show ix
-          , let points  = valuesBySlot run
-      ]
-  where
-    valuesBySlot run =
-        V.toList
-      $ V.filter (notExcluded mExcludedSlots . fst)
-      $ V.zip (run .> selSlot) (run .> selector)
+      outfile
 
-    notExcluded Nothing      _ = True
-    notExcluded (Just slots) s = s `Set.notMember` slots
+-- | The (slot, value) pairs a plot is drawn from. Kept here rather than in
+-- "Cardano.Beacon.Plot" so that selecting data stays independent of whether
+-- this build can draw it.
+valuesBySlot :: Selector -> Maybe (Set Double) -> BeaconRun -> [(Double, Double)]
+valuesBySlot selector mExcludedSlots run =
+      V.toList
+    $ V.filter (notExcluded . fst)
+    $ V.zip (run .> selSlot) (run .> selector)
+  where
+    notExcluded s = maybe True (Set.notMember s) mExcludedSlots
 
 --------------------------------------------------------------------------------
 -- Printing functions
