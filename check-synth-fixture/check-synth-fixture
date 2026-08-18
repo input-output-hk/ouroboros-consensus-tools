@@ -1,0 +1,630 @@
+#!/usr/bin/env python3
+
+"""
+Check that a hand-built node configuration synthesizes a Dijkstra chain.
+
+`db-synthesizer` needs a node configuration, a genesis whose staking delegates
+to a pool, and the credentials of that pool. A configuration that misses any of
+those still runs: the tool reports zero forgers, or it forges a chain in an
+earlier era. Neither outcome fails loudly, so this script checks the whole
+pipeline instead.
+
+It runs three tools over one fixture directory, then reads what they wrote:
+
+- `db-synthesizer` forges a chain. Its own credentials load, and its blocks
+  reach the ChainDB.
+- `db-immutaliser` copies that chain out of the VolatileDB. `db-analyser` reads
+  the ImmutableDB, so without this step it counts nothing.
+- `db-analyser --count-blocks` re-applies every block from genesis. This is the
+  strongest check here, because full validation proves the genesis is coherent
+  and not merely well formed.
+
+`check_fixture` reads the configuration before any tool runs:
+
+- The configuration names a genesis file for every era, and each file exists.
+- `TestDijkstraHardForkAtEpoch` is 0. Without it Dijkstra keeps its
+  default-version trigger, which needs an on-chain protocol version of 12, and
+  a chain from genesis stops in Conway.
+- The genesis protocol version is 12. Each era's `createInitialState` enforces
+  `eraProtVerLow <= curProtVer`, and Dijkstra's low version is 12.
+- The genesis registers exactly one pool, that pool's map key matches its own
+  `poolId`, and every stake credential delegates to it.
+- The pool carries a `leiosKey` of two even-length hex strings. The ledger reads
+  this field as optional, so a wrong shape degrades to a keyless committee seat
+  in silence.
+
+`check_keys` compares the genesis against the credentials, which needs
+`cardano-cli`. The checks above are self-consistent, so they hold even when the
+genesis names a pool whose keys nobody holds. These do not:
+
+- `stake-pool id` of the cold verification key equals the genesis `poolId`.
+- `key-hash-VRF` of the VRF verification key equals the genesis `vrf`.
+- The three credential files carry the envelope types that `db-synthesizer`
+  accepts.
+
+`check_era` reads the era tag of every block that reached the ImmutableDB. A
+Cardano block is stored as a CBOR 2-list, `[eraTag, block]`, and tag 8 is
+Dijkstra. A forged block proves nothing about the era on its own, because
+forging also succeeds in Conway.
+
+The script runs these tools and it never builds one. Build them in the consensus
+repository, on the `leios-prototype` branch. Build `cardano-cli` from the
+`leios-prototype` branch of the cardano-cli repository, which is the branch that
+holds the BLS commands.
+"""
+
+import argparse
+import collections
+import json
+import os
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+
+# Era tags of the Cardano block disk encoding. See `encodeDiskHfcBlock` in
+# `Ouroboros/Consensus/Cardano/Node.hs`, which prepends these, and
+# `decodeDiskHfcBlock`, which reads them back.
+ERA_TAGS = {
+    0: "Byron EBB",
+    1: "Byron",
+    2: "Shelley",
+    3: "Allegra",
+    4: "Mary",
+    5: "Alonzo",
+    6: "Babbage",
+    7: "Conway",
+    8: "Dijkstra",
+}
+
+DIJKSTRA_TAG = 8
+
+# Dijkstra's `ProtVerLow`, from the ledger's era definitions.
+DIJKSTRA_PROT_VER = 12
+
+# One entry of the ImmutableDB secondary index. See `entrySize` in
+# `Ouroboros/Consensus/Storage/ImmutableDB/Impl/Index/Secondary.hs`:
+# blockOffset(8) + headerOffset(2) + headerSize(2) + checksum(4) + headerHash
+# + blockOrEBB(8). Cardano hashes are 32 bytes. `Data.Binary` writes the offset
+# big-endian.
+CARDANO_HASH_SIZE = 32
+SECONDARY_ENTRY_SIZE = 8 + 2 + 2 + 4 + CARDANO_HASH_SIZE + 8
+
+# The envelope types that `Cardano/Node/Protocol/Shelley.hs` parses for the
+# three `--shelley-*` credential options.
+EXPECTED_ENVELOPE_TYPES = {
+    "opcert.json": "NodeOperationalCertificate",
+    "vrf.skey": "VrfSigningKey_PraosVRF",
+    "kes.skey": "KesSigningKey_ed25519_kes_2^6",
+}
+
+HEX_RE = re.compile(r"\A[0-9a-f]+\Z")
+FORGER_COUNT_RE = re.compile(r"^--> forger count: (\d+)$", re.M)
+FORGED_RE = re.compile(r"^--> forged and adopted (\d+) blocks; reached SlotNo (\d+)$", re.M)
+CANDIDATES_RE = re.compile(r"^Number of candidates: (\d+)$", re.M)
+IMMUTALISED_RE = re.compile(r"^Copied to ImmutableDB, new tip is (.*)$", re.M)
+COUNTED_RE = re.compile(r"Counted (\d+) blocks\.", re.M)
+EB_COUNT_RE = re.compile(r"^\[[^]]*\] BlockNo \d+\s+SlotNo \d+\s+cumulative: (\d+)\s+count: (\d+)\s+EB count: (\d+)$", re.M)
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument(
+        "fixture_dir",
+        help="directory holding config.json, the genesis files, and keys/",
+    )
+    p.add_argument("--blocks", type=int, default=200, help="blocks to forge (default 200)")
+    p.add_argument("--work-dir", help="where to write the ChainDB and the tool logs")
+    p.add_argument("--db-synthesizer", help="path to the db-synthesizer binary")
+    p.add_argument("--db-immutaliser", help="path to the db-immutaliser binary")
+    p.add_argument("--db-analyser", help="path to the db-analyser binary")
+    p.add_argument(
+        "--cardano-cli",
+        help="path to a cardano-cli that has the Dijkstra era commands",
+    )
+    p.add_argument(
+        "--skip-key-checks",
+        action="store_true",
+        help="do not compare the genesis against the credentials, and do not look for cardano-cli",
+    )
+    return p.parse_args()
+
+
+def resolve_binary(name, given, env_var, required=True):
+    """Find one binary.
+
+    Reads the flag, then the environment variable, then PATH. This script runs
+    these tools and it never builds one. In the consensus repository,
+    `cabal list-bin <name>` prints the path that a build in the development
+    shell produced.
+    """
+    if given:
+        if not os.access(given, os.X_OK):
+            fail(f"--{name} {given} is not executable")
+        return given
+
+    from_env = os.environ.get(env_var)
+    if from_env:
+        if not os.access(from_env, os.X_OK):
+            fail(f"{env_var} {from_env} is not executable")
+        return from_env
+
+    on_path = shutil.which(name)
+    if on_path:
+        return on_path
+
+    if not required:
+        return None
+
+    fail(f"cannot find {name}. Pass --{name} PATH, set {env_var}, or put {name} on PATH.")
+
+
+def fixture_paths(fixture_dir):
+    config = os.path.join(fixture_dir, "config.json")
+    if not os.path.isfile(config):
+        fail(f"{config} does not exist")
+    with open(config) as f:
+        cfg = json.load(f)
+    genesis_name = cfg.get("ShelleyGenesisFile")
+    if not genesis_name:
+        fail(f"{config} has no ShelleyGenesisFile")
+    return {
+        "dir": fixture_dir,
+        "config": config,
+        "cfg": cfg,
+        "genesis": os.path.join(fixture_dir, genesis_name),
+        "keys": os.path.join(fixture_dir, "keys"),
+    }
+
+
+def check(name, ok, detail=""):
+    """Report one check. Returns whether it passed, so the caller can count."""
+    print(f"{'ok  ' if ok else 'FAIL'}  {name}{': ' + detail if detail else ''}")
+    return ok
+
+
+def check_fixture(paths):
+    """Read the configuration and the genesis. Returns the failure count."""
+    results = []
+    cfg = paths["cfg"]
+
+    results.append(check("protocol is Cardano", cfg.get("Protocol") == "Cardano", str(cfg.get("Protocol"))))
+
+    results.append(
+        check(
+            "config triggers Dijkstra at epoch 0",
+            cfg.get("TestDijkstraHardForkAtEpoch") == 0,
+            f"TestDijkstraHardForkAtEpoch = {cfg.get('TestDijkstraHardForkAtEpoch')}",
+        )
+    )
+
+    results.append(
+        check(
+            "config enables experimental hard forks",
+            cfg.get("ExperimentalHardForksEnabled") is True,
+            f"ExperimentalHardForksEnabled = {cfg.get('ExperimentalHardForksEnabled')}",
+        )
+    )
+
+    missing = []
+    for key in (
+        "ByronGenesisFile",
+        "ShelleyGenesisFile",
+        "AlonzoGenesisFile",
+        "ConwayGenesisFile",
+        "DijkstraGenesisFile",
+    ):
+        name = cfg.get(key)
+        if not name or not os.path.isfile(os.path.join(paths["dir"], name)):
+            missing.append(key)
+    results.append(
+        check(
+            "every genesis file the config names exists",
+            not missing,
+            "" if not missing else "missing " + ", ".join(missing),
+        )
+    )
+
+    with open(paths["genesis"]) as f:
+        genesis = json.load(f)
+
+    major = genesis.get("protocolParams", {}).get("protocolVersion", {}).get("major")
+    results.append(
+        check(
+            f"genesis protocol version is {DIJKSTRA_PROT_VER}",
+            major == DIJKSTRA_PROT_VER,
+            f"major = {major}",
+        )
+    )
+
+    pools = genesis.get("staking", {}).get("pools", {})
+    results.append(check("genesis registers exactly one pool", len(pools) == 1, f"{len(pools)} pools"))
+    if len(pools) != 1:
+        return results.count(False), None
+
+    pool_key, pool = next(iter(pools.items()))
+    results.append(
+        check(
+            "the pool's map key matches its poolId",
+            pool.get("poolId") == pool_key,
+            f"key {pool_key}, poolId {pool.get('poolId')}",
+        )
+    )
+
+    stake = genesis.get("staking", {}).get("stake", {})
+    wrong = {c: t for c, t in stake.items() if t != pool_key}
+    results.append(
+        check(
+            "every stake credential delegates to that pool",
+            bool(stake) and not wrong,
+            f"{len(stake)} credentials" + ("" if not wrong else f", {len(wrong)} point elsewhere"),
+        )
+    )
+
+    leios_key = pool.get("leiosKey")
+    if not isinstance(leios_key, dict):
+        results.append(check("the pool registers a leiosKey", False, f"leiosKey is {type(leios_key).__name__}"))
+    else:
+        bad = []
+        sizes = []
+        for field in ("leiosPubKey", "leiosPossessionProof"):
+            v = leios_key.get(field)
+            if not isinstance(v, str) or not HEX_RE.match(v) or len(v) % 2:
+                bad.append(field)
+            else:
+                sizes.append(f"{field} {len(v) // 2} bytes")
+        results.append(
+            check(
+                "the pool registers a leiosKey of even-length hex",
+                not bad,
+                ", ".join(sizes) if not bad else "malformed: " + ", ".join(bad),
+            )
+        )
+
+    return results.count(False), pool
+
+
+def check_keys(cardano_cli, paths, pool):
+    """Compare the genesis pool against the credentials. Returns the failure count."""
+    results = []
+
+    def cli(*args):
+        out = subprocess.run(
+            [cardano_cli, "dijkstra", *args],
+            capture_output=True,
+            text=True,
+        )
+        if out.returncode != 0:
+            fail(f"cardano-cli {' '.join(args)} failed:\n{out.stderr.strip()}")
+        return out.stdout.strip()
+
+    pool_id = cli(
+        "stake-pool",
+        "id",
+        "--cold-verification-key-file",
+        os.path.join(paths["keys"], "cold.vkey"),
+        "--output-hex",
+    )
+    results.append(
+        check(
+            "cold key derives the genesis poolId",
+            pool_id == pool.get("poolId"),
+            f"cardano-cli {pool_id}, genesis {pool.get('poolId')}",
+        )
+    )
+
+    vrf_hash = cli(
+        "node",
+        "key-hash-VRF",
+        "--verification-key-file",
+        os.path.join(paths["keys"], "vrf.vkey"),
+    )
+    results.append(
+        check(
+            "VRF key hashes to the genesis vrf field",
+            vrf_hash == pool.get("vrf"),
+            f"cardano-cli {vrf_hash}, genesis {pool.get('vrf')}",
+        )
+    )
+
+    wrong = []
+    for name, want in EXPECTED_ENVELOPE_TYPES.items():
+        path = os.path.join(paths["keys"], name)
+        if not os.path.isfile(path):
+            wrong.append(f"{name} is missing")
+            continue
+        with open(path) as f:
+            got = json.load(f).get("type")
+        if got != want:
+            wrong.append(f"{name} is {got}, want {want}")
+    results.append(
+        check(
+            "the credential files carry the envelope types db-synthesizer parses",
+            not wrong,
+            "; ".join(wrong),
+        )
+    )
+
+    return results.count(False)
+
+
+def run_tool(argv, log_path):
+    """Run one tool, tee its output to a log, and return that output."""
+    out = subprocess.run(argv, capture_output=True, text=True)
+    text = out.stdout + out.stderr
+    with open(log_path, "w") as f:
+        f.write(text)
+    if out.returncode != 0:
+        fail(f"{argv[0]} exited {out.returncode}. See {log_path}:\n{tail(text, 15)}")
+    return text
+
+
+def check_synthesis(db_synthesizer, paths, db_dir, blocks, work_dir):
+    """Forge a chain. Returns the failure count and the blocks forged."""
+    results = []
+    keys = paths["keys"]
+    out = run_tool(
+        [
+            db_synthesizer,
+            "--config",
+            paths["config"],
+            "--db",
+            db_dir,
+            "--shelley-operational-certificate",
+            os.path.join(keys, "opcert.json"),
+            "--shelley-vrf-key",
+            os.path.join(keys, "vrf.skey"),
+            "--shelley-kes-key",
+            os.path.join(keys, "kes.skey"),
+            "-b",
+            str(blocks),
+            "-f",
+        ],
+        os.path.join(work_dir, "db-synthesizer.log"),
+    )
+
+    m = FORGER_COUNT_RE.search(out)
+    forgers = int(m.group(1)) if m else 0
+    results.append(
+        check(
+            "db-synthesizer loads the credentials",
+            forgers >= 1,
+            f"forger count {forgers}" if m else "no forger count line",
+        )
+    )
+
+    m = FORGED_RE.search(out)
+    forged = int(m.group(1)) if m else 0
+    reached = int(m.group(2)) if m else 0
+    results.append(
+        check(
+            "db-synthesizer forges and adopts every requested block",
+            forged == blocks,
+            f"forged {forged} of {blocks}, reached slot {reached}",
+        )
+    )
+
+    return results.count(False), forged
+
+
+def check_immutalisation(db_immutaliser, paths, db_dir, work_dir):
+    """Copy the chain into the ImmutableDB. Returns the failure count."""
+    results = []
+    out = run_tool(
+        [
+            db_immutaliser,
+            "--immutable-db",
+            os.path.join(db_dir, "immutable"),
+            "--volatile-db",
+            os.path.join(db_dir, "volatile"),
+            "--config",
+            paths["config"],
+        ],
+        os.path.join(work_dir, "db-immutaliser.log"),
+    )
+
+    m = CANDIDATES_RE.search(out)
+    candidates = int(m.group(1)) if m else 0
+    results.append(
+        check(
+            "the VolatileDB holds one candidate chain",
+            candidates == 1,
+            f"{candidates} candidates",
+        )
+    )
+
+    m = IMMUTALISED_RE.search(out)
+    results.append(
+        check(
+            "db-immutaliser moves the chain to the ImmutableDB",
+            m is not None,
+            m.group(1) if m else "no new tip line",
+        )
+    )
+
+    return results.count(False)
+
+
+def check_analysis(db_analyser, paths, db_dir, forged, work_dir):
+    """Re-apply every block and count them. Returns the failure count."""
+    results = []
+    out = run_tool(
+        [
+            db_analyser,
+            "--db",
+            db_dir,
+            "--in-mem",
+            "--stubbed-leios-db",
+            "--db-validation",
+            "validate-all-blocks",
+            "--count-blocks",
+            "--config",
+            paths["config"],
+        ],
+        os.path.join(work_dir, "db-analyser-count-blocks.log"),
+    )
+
+    m = COUNTED_RE.search(out)
+    counted = int(m.group(1)) if m else -1
+    results.append(
+        check(
+            "db-analyser validates every block and agrees on the count",
+            counted == forged,
+            f"counted {counted}, forged {forged}",
+        )
+    )
+
+    # The Leios columns are reported, not asserted. Today db-synthesizer passes
+    # no transactions and no certificate, so every column reads 0. When the
+    # forge loop produces endorser blocks, these totals start to move.
+    out = run_tool(
+        [
+            db_analyser,
+            "--db",
+            db_dir,
+            "--in-mem",
+            "--stubbed-leios-db",
+            "--count-tx-outputs",
+            "--config",
+            paths["config"],
+        ],
+        os.path.join(work_dir, "db-analyser-count-tx-outputs.log"),
+    )
+    rows = EB_COUNT_RE.findall(out)
+    tx_total = sum(int(r[1]) for r in rows)
+    eb_total = sum(int(r[2]) for r in rows)
+    print(f"note  count-tx-outputs: {len(rows)} rows, {tx_total} block txs, {eb_total} EB txs")
+
+    return results.count(False)
+
+
+def check_era(db_dir):
+    """Read the era tag of every immutalised block. Returns the failure count."""
+    immutable = os.path.join(db_dir, "immutable")
+    chunks = sorted(f[: -len(".chunk")] for f in os.listdir(immutable) if f.endswith(".chunk"))
+
+    tags = collections.Counter()
+    problems = []
+    for stem in chunks:
+        secondary_path = os.path.join(immutable, stem + ".secondary")
+        chunk_path = os.path.join(immutable, stem + ".chunk")
+        if not os.path.isfile(secondary_path):
+            problems.append(f"{stem}.secondary is missing")
+            continue
+        with open(secondary_path, "rb") as f:
+            index = f.read()
+        with open(chunk_path, "rb") as f:
+            blob = f.read()
+        if len(index) % SECONDARY_ENTRY_SIZE:
+            problems.append(
+                f"{stem}.secondary is {len(index)} bytes, not a multiple of {SECONDARY_ENTRY_SIZE}"
+            )
+            continue
+        for i in range(len(index) // SECONDARY_ENTRY_SIZE):
+            (offset,) = struct.unpack_from(">Q", index, i * SECONDARY_ENTRY_SIZE)
+            if offset + 1 >= len(blob):
+                problems.append(f"{stem}: entry {i} points past the end of the chunk")
+                continue
+            # A Cardano block on disk is a CBOR 2-list: [eraTag, block].
+            if blob[offset] != 0x82:
+                problems.append(f"{stem}: entry {i} does not start a CBOR 2-list")
+                continue
+            tags[blob[offset + 1]] += 1
+
+    total = sum(tags.values())
+    described = ", ".join(
+        f"{ERA_TAGS.get(tag, f'tag {tag}')} {n}" for tag, n in sorted(tags.items())
+    )
+
+    results = []
+    results.append(
+        check(
+            "the ImmutableDB index reads cleanly",
+            not problems,
+            "; ".join(problems[:3]),
+        )
+    )
+    results.append(
+        check(
+            "every block on the chain is a Dijkstra block",
+            total > 0 and set(tags) == {DIJKSTRA_TAG},
+            described if total else "no blocks found",
+        )
+    )
+    return results.count(False)
+
+
+def tail(text, n):
+    return "\n".join(text.splitlines()[-n:])
+
+
+def fail(message):
+    print(f"FAIL: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def main():
+    # Keep our lines in order with the ones the tools write to stdout.
+    sys.stdout.reconfigure(line_buffering=True)
+
+    args = parse_args()
+
+    paths = fixture_paths(args.fixture_dir)
+    db_synthesizer = resolve_binary("db-synthesizer", args.db_synthesizer, "DB_SYNTHESIZER")
+    db_immutaliser = resolve_binary("db-immutaliser", args.db_immutaliser, "DB_IMMUTALISER")
+    db_analyser = resolve_binary("db-analyser", args.db_analyser, "DB_ANALYSER")
+    cardano_cli = (
+        None
+        if args.skip_key_checks
+        else resolve_binary("cardano-cli", args.cardano_cli, "CARDANO_CLI", required=False)
+    )
+
+    # Not TMPDIR: `nix develop` points it at a directory that it deletes when
+    # the shell exits, and the caller has to be able to read the logs after a
+    # failure.
+    work_dir = args.work_dir or tempfile.mkdtemp(prefix="check-synth-fixture-", dir="/tmp")
+    os.makedirs(work_dir, exist_ok=True)
+    db_dir = os.path.join(work_dir, "db")
+
+    print(f"fixture:        {paths['dir']}")
+    print(f"config:         {paths['config']}")
+    print(f"genesis:        {paths['genesis']}")
+    print(f"db-synthesizer: {db_synthesizer}")
+    print(f"db-immutaliser: {db_immutaliser}")
+    print(f"db-analyser:    {db_analyser}")
+    print(f"cardano-cli:    {cardano_cli or 'not used'}")
+    print(f"work dir:       {work_dir}")
+    print()
+
+    failures, pool = check_fixture(paths)
+
+    if pool is None:
+        print(f"\n{failures} checks failed")
+        sys.exit(1)
+
+    if cardano_cli:
+        failures += check_keys(cardano_cli, paths, pool)
+    elif not args.skip_key_checks:
+        print("note  no cardano-cli found, so the genesis is not compared against the credentials")
+
+    print()
+    synth_failures, forged = check_synthesis(db_synthesizer, paths, db_dir, args.blocks, work_dir)
+    failures += synth_failures
+    if forged == 0:
+        print(f"\n{failures} checks failed. No chain to analyse, so the rest did not run.")
+        sys.exit(1)
+
+    failures += check_immutalisation(db_immutaliser, paths, db_dir, work_dir)
+    failures += check_analysis(db_analyser, paths, db_dir, forged, work_dir)
+    failures += check_era(db_dir)
+
+    print()
+    if failures:
+        print(f"{failures} checks failed. Logs are in {work_dir}")
+        sys.exit(1)
+    print(f"all checks passed. Logs are in {work_dir}")
+
+
+main()
