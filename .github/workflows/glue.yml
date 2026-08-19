@@ -141,6 +141,17 @@ jobs:
             ${{ matrix.image }} \
             sh -eux -c '
               (ldd --version 2>&1 || true) | head -1
+
+              # Some minimal container images ship neither tar nor gzip.
+              # amazonlinux:2023 is one, although the EC2 AMI has both. Install
+              # them here so this job tests the artifact rather than the package
+              # list of the image.
+              if ! command -v tar >/dev/null 2>&1 || ! command -v gzip >/dev/null 2>&1; then
+                (dnf install -y -q tar gzip || yum install -y -q tar gzip \
+                  || (apt-get update -qq && apt-get install -y -qq tar gzip) \
+                  || apk add --no-cache tar gzip) >/dev/null 2>&1
+              fi
+
               cp /artifact/glue /tmp/glue
               chmod +x /tmp/glue
               /tmp/glue --help > /tmp/out 2>&1 || { cat /tmp/out; exit 1; }

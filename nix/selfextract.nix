@@ -36,10 +36,16 @@
     esac
 
     if [ ! -f "$DIR/.complete" ]; then
-      command -v tar >/dev/null 2>&1 || {
-        echo "glue: unpacking needs 'tar', which is not on PATH" >&2
-        exit 1
-      }
+      for t in tar gzip; do
+        command -v "$t" >/dev/null 2>&1 || {
+          echo "glue: unpacking needs '$t', which is not on PATH." >&2
+          echo "  Debian/Ubuntu:  apt-get install -y tar gzip" >&2
+          echo "  RHEL/Rocky:     dnf install -y tar gzip" >&2
+          echo "  Amazon Linux:   dnf install -y tar gzip" >&2
+          echo "  Alpine:         apk add tar gzip" >&2
+          exit 1
+        }
+      done
 
       # Unpack beside the target and rename, so an interrupted run cannot
       # leave a half-populated directory that looks ready to use.
