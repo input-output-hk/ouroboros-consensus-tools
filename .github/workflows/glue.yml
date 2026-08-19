@@ -48,6 +48,34 @@ jobs:
       - name: Check nix formatting
         run: nix run nixpkgs#alejandra -- --check flake.nix flake nix perSystem
 
+      # docs/SPO-PREREQUISITES.md states which platforms are tested. If that
+      # list and this workflow's matrix drift apart, the document becomes
+      # confident fiction -- which is precisely how the tar/gzip and glibc
+      # claims in it got written wrong in the first place.
+      - name: Prerequisites doc matches the tested matrix
+        run: |
+          set -euo pipefail
+          doc=docs/SPO-PREREQUISITES.md
+          grep -oE '^          - image: [^ ]+' .github/workflows/glue.yml \
+            | awk '{print $3}' | sort -u > /tmp/matrix
+          echo "images tested by this workflow:"; sed 's/^/  /' /tmp/matrix
+
+          missing=0
+          while read -r img; do
+            grep -qF "\`$img\`" "$doc" || {
+              echo "::error::$img is tested but not listed in $doc"; missing=1; }
+          done < /tmp/matrix
+
+          # shellcheck disable=SC2016  # backticks are markdown, not substitution
+          grep -oE '\`(rockylinux|amazonlinux|ubuntu|debian|fedora|alpine):[^\`]+\`' "$doc" \
+            | tr -d '`' | sort -u > /tmp/doc-images
+          while read -r img; do
+            grep -qx "$img" /tmp/matrix || {
+              echo "::error::$doc claims $img is tested, but the matrix does not"; missing=1; }
+          done < /tmp/doc-images
+
+          test "$missing" -eq 0
+
       # Result symlinks go to /tmp, never into the checkout: an untracked
       # `result` makes the flake's git tree dirty.
       - name: Build the relocatable payload
@@ -160,3 +188,32 @@ jobs:
               /tmp/glue --help > /dev/null 2>&1
               test -f /tmp/glue-home/*/.complete
             '
+
+  # The prerequisites document says the artifact refuses to unpack without tar
+  # and names the fix. Asserted rather than trusted: amazonlinux:2023 ships
+  # neither tar nor gzip, so it is the natural place to check.
+  missing-tar-message:
+    name: Fails cleanly without tar
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: glue-x86_64-linux
+          path: /tmp/artifact
+
+      - name: Refuses to unpack, and says how to fix it
+        run: |
+          set -euo pipefail
+          chmod +x /tmp/artifact/glue
+          if docker run --rm -v /tmp/artifact:/artifact:ro \
+               -e GLUE_HOME=/tmp/glue-home amazonlinux:2023 \
+               sh -c 'cp /artifact/glue /tmp/glue && chmod +x /tmp/glue && /tmp/glue --help' \
+               > /tmp/out 2>&1; then
+            echo "::error::expected failure without tar, but it succeeded"
+            exit 1
+          fi
+          cat /tmp/out
+          grep -q "needs 'tar'" /tmp/out
+          grep -q "dnf install -y tar gzip" /tmp/out
