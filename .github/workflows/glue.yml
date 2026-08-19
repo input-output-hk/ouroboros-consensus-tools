@@ -68,10 +68,13 @@ jobs:
           test -e "/tmp/tree/lib/libc.so.6"
           test -e "/tmp/tree/lib/$(cat /tmp/tree/share/loader)"
 
+          echo "--- interpreter patch table ---"
+          cat /tmp/tree/share/interp.offsets
+
           # RPATH must be $ORIGIN-relative, or the tree only works where built.
           for b in /tmp/tree/bin/*; do
-            /tmp/tree/libexec/patchelf --print-interpreter "$b" >/dev/null 2>&1 || continue
-            rpath=$(/tmp/tree/libexec/patchelf --print-rpath "$b")
+            nix run nixpkgs#patchelf -- --print-interpreter "$b" >/dev/null 2>&1 || continue
+            rpath=$(nix run nixpkgs#patchelf -- --print-rpath "$b")
             echo "$(basename "$b"): rpath=$rpath"
             # shellcheck disable=SC2016  # $ORIGIN is a literal, not a variable
             case "$rpath" in

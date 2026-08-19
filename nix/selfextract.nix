@@ -60,12 +60,26 @@
       # read by the kernel, which does no $ORIGIN expansion, so it has to be an
       # absolute path -- and this directory was not known until just now.
       # RPATH is already $ORIGIN-relative and needs no fixing.
-      loader="$staging/lib/$(cat "$staging/share/loader")"
-      for b in "$staging"/bin/*; do
-        if "$staging/libexec/patchelf" --print-interpreter "$b" >/dev/null 2>&1; then
-          "$staging/libexec/patchelf" --set-interpreter "$loader" "$b"
+      #
+      # The build left an over-long placeholder in each binary's .interp and
+      # recorded its offset, so this is a byte overwrite rather than an ELF
+      # rewrite: no patchelf on this machine, and nothing beyond a few bytes of
+      # a 72 MiB binary is touched. The string is NUL-terminated, so writing the
+      # path plus a NUL over a longer placeholder is all that is needed.
+      #
+      # Note the final directory is written, not the staging one: the tree is
+      # renamed into place below.
+      loader="$DIR/lib/$(cat "$staging/share/loader")"
+      while read -r bin off cap; do
+        if [ "''${#loader}" -ge "$cap" ]; then
+          echo "glue: install path is too long for the reserved interpreter" >&2
+          echo "  wanted: $loader (''${#loader} bytes, limit $cap)" >&2
+          echo "  set GLUE_HOME to a shorter path and retry" >&2
+          exit 1
         fi
-      done
+        printf '%s\0' "$loader" \
+          | dd of="$staging/bin/$bin" bs=1 seek="$off" conv=notrunc status=none
+      done < "$staging/share/interp.offsets"
 
       touch "$staging/.complete"
       mkdir -p "$ROOT"

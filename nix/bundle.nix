@@ -12,12 +12,22 @@
 #                         RPATH to $ORIGIN/../lib so libraries are found
 #                         relative to the binary wherever it ends up
 #
-#   at extraction time    set PT_INTERP to the unpacked loader. This cannot
+#   at extraction time    point PT_INTERP at the unpacked loader. This cannot
 #                         happen now: PT_INTERP is read by the kernel, which
 #                         performs no $ORIGIN expansion, so it must be an
 #                         absolute path -- and the install directory is not
-#                         known until the artifact is unpacked. See
-#                         nix/selfextract.nix.
+#                         known until the artifact is unpacked.
+#
+# The second half needs no tooling on the SPO's machine. We set a deliberately
+# over-long placeholder interpreter here and record its byte offset; extraction
+# overwrites those bytes in place with the real path. The .interp string is
+# NUL-terminated, so a shorter path plus a NUL is all that is required, and
+# nothing larger than a few bytes of a 72 MiB binary is ever rewritten.
+#
+# The alternative -- shipping patchelf to run at extraction -- needed a
+# *static* patchelf, since it would execute before any interpreter had been
+# pointed anywhere, and pkgsStatic.patchelf does not build: its own test suite
+# links shared libraries, which a fully static musl environment cannot do.
 {
   pkgs,
   lib,
@@ -32,7 +42,7 @@
     } ''
       cp -r ${payload} $out
       chmod -R u+w $out
-      mkdir -p $out/lib $out/libexec $out/share
+      mkdir -p $out/lib $out/share
 
       is_elf() { patchelf --print-interpreter "$1" >/dev/null 2>&1; }
 
@@ -82,13 +92,28 @@
         patchelf --set-rpath '$ORIGIN/../lib' "$b"
       done
 
-      # Statically linked on purpose: this runs at extraction time, before any
-      # interpreter has been pointed anywhere, so it cannot itself depend on a
-      # loader we have not set up yet.
-      install -m755 ${pkgs.pkgsStatic.patchelf}/bin/patchelf $out/libexec/patchelf
+      # A placeholder interpreter, long enough to hold any plausible install
+      # path, plus the offset at which extraction should overwrite it. 256
+      # bytes covers "$HOME/.cache/glue/<16 hex>/lib/<loader>" with generous
+      # room; extraction fails loudly rather than silently truncating if a
+      # pathological $HOME exceeds it.
+      pad=$(printf 'X%.0s' $(seq 1 236))
+      placeholder="/GLUE_INTERP_PLACEHOLDER/$pad"
+      : > $out/share/interp.offsets
+      for b in $out/bin/*; do
+        is_elf "$b" || continue
+        patchelf --set-interpreter "$placeholder" "$b"
+        off=$(grep -abo '/GLUE_INTERP_PLACEHOLDER' "$b" | head -1 | cut -d: -f1)
+        if [ -z "$off" ]; then
+          echo "could not locate the placeholder in $(basename "$b")" >&2
+          exit 1
+        fi
+        echo "$(basename "$b") $off ''${#placeholder}" >> $out/share/interp.offsets
+      done
 
-      echo "--- resulting linkage of bin/beacon ---"
+      echo "--- interpreter patch table ---"
+      cat $out/share/interp.offsets
+      echo "--- rpath of bin/beacon ---"
       patchelf --print-rpath $out/bin/beacon
-      patchelf --print-interpreter $out/bin/beacon
     '';
 }
