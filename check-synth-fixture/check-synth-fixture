@@ -12,6 +12,9 @@ pipeline instead.
 The fixture sits in `fixture/` next to this script, so a checkout can run it
 with no argument. Pass a directory to check a different one.
 
+The repository keeps no signing key, so a fresh checkout has no credentials.
+Run `make-fixture` once to write them and to point the genesis at them.
+
 It runs three tools over one fixture directory, then reads what they wrote:
 
 - `db-synthesizer` forges a chain. Its own credentials load, and its blocks
@@ -312,11 +315,12 @@ def check_fixture(paths):
     # `db-synthesizer` spends the output of this key, once for every transaction
     # it generates. Without the key it forges empty blocks, and without an
     # `initialFunds` entry it stops on the first slot it leads.
+    has_payment_key = os.path.isfile(paths["payment_skey"])
     results.append(
         check(
             "the fixture holds a payment signing key",
-            os.path.isfile(paths["payment_skey"]),
-            paths["payment_skey"],
+            has_payment_key,
+            paths["payment_skey"] if has_payment_key else "run make-fixture first",
         )
     )
 

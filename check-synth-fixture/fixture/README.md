@@ -1,18 +1,19 @@
 # The fixture that `check-synth-fixture` reads
 
-A node configuration, five genesis files, and the credentials of the one pool
-that the genesis registers. `db-synthesizer` forges a Dijkstra chain from it.
-`db-immutaliser` and `db-analyser` then read that chain.
+A node configuration and five genesis files. `db-synthesizer` forges a Dijkstra
+chain from them. `db-immutaliser` and `db-analyser` then read that chain.
 
-Run the check from a checkout, with no argument:
+`keys/` is absent from a checkout and git ignores it. Write it, and point the
+genesis at what it wrote:
 
+    ./check-synth-fixture/make-fixture
     ./check-synth-fixture/check-synth-fixture
 
-## The keys hold nothing
+## What `make-fixture` writes
 
-Every key here is a test key of a synthetic chain that no network ever carried.
-The chain starts at the genesis in this directory and it forges in one process.
-The keys sign nothing outside this directory and they hold no funds.
+`make-fixture` makes each of these, and then it rewrites `staking.pools`,
+`staking.stake`, and `initialFunds` in `shelley-genesis.json` to match. So the
+genesis in this directory names a pool that only the local `keys/` can forge for.
 
 | File | Purpose |
 |---|---|
@@ -22,6 +23,10 @@ The keys sign nothing outside this directory and they hold no funds.
 | `keys/opcert.json`, `keys/opcert.counter` | the operational certificate of that pool |
 | `keys/bls.skey`, `keys/bls.vkey`, `keys/bls.pop` | the Leios key of that pool, and its proof of possession |
 | `keys/payment.skey`, `keys/payment.vkey` | the key whose output the generated transactions spend |
+
+Every key is a test key of a synthetic chain that no network ever carried. The
+chain starts at the genesis in this directory and it forges in one process. The
+keys sign nothing outside this directory and they hold no funds.
 
 ## What makes the chain reach Dijkstra
 

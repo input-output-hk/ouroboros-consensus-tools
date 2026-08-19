@@ -14,8 +14,17 @@ It belongs to the Leios prototype, which lives on the `leios-prototype` branch o
 ## Running it
 
 The fixture sits in [`fixture/`](fixture/) next to the script, so no path is needed.
-That directory holds `config.json`, the five genesis files it names, and a `keys/` subdirectory.
+That directory holds `config.json` and the five genesis files it names.
 Pass a directory as the one positional argument to check a different fixture.
+
+The repository keeps no signing key, so a checkout has no credentials.
+[`make-fixture`](make-fixture) writes them, and it rewrites the parts of `shelley-genesis.json` that are derived from them.
+Run it once:
+
+```sh
+export CARDANO_CLI=/path/to/cardano-cli
+./check-synth-fixture/make-fixture
+```
 
 The script runs the tools and it never builds one.
 For each tool it reads the flag, then the environment variable, then `PATH`.

@@ -12,3 +12,7 @@ dist/
 
 # beacon default data directory
 beacon-data/
+
+# The fixture credentials. `check-synth-fixture/make-fixture` writes them, and
+# no signing key belongs in a repository.
+/check-synth-fixture/fixture/keys/

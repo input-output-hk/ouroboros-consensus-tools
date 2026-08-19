@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+
+"""
+Generate the credentials that `check-synth-fixture` needs, and point the genesis
+at them.
+
+The repository keeps the configuration and the genesis files, and it keeps no
+signing key. This script makes the keys and then rewrites the parts of
+`shelley-genesis.json` that are derived from them:
+
+- `staking.pools`, whose one entry names the pool that forges the chain. Its
+  `poolId`, `vrf`, and `leiosKey` all come from the keys below.
+- `staking.stake`, whose one entry delegates to that pool.
+- `initialFunds`, which gains the address of the payment key.
+
+Run it once after a checkout, then run `check-synth-fixture`.
+
+It needs a `cardano-cli` from the `leios-prototype` branch of
+https://github.com/IntersectMBO/cardano-cli/, which is the branch that has the
+Dijkstra era commands. Pass `--cardano-cli`, set `CARDANO_CLI`, or put it on
+`PATH`.
+
+The keys hold nothing. They sign a synthetic chain that starts at the genesis
+beside them, and that chain reaches no network.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+# `kes-period 0` covers a whole epoch: the genesis sets `slotsPerKESPeriod` to
+# 129600 against an `epochLength` of 86400.
+KES_PERIOD = 0
+
+# The payment key funds every transaction that `db-synthesizer` generates. One
+# transaction pays a fee of one ada, and a full block holds a few hundred of
+# them, so a run of a few thousand blocks costs on the order of a million ada.
+PAYMENT_BALANCE = 1_000_000_000_000_000
+
+# A Shelley address is a header byte and then the payment credential. Header
+# 0x60 is an enterprise address (type 6) on the testnet (network 0). It carries
+# a key hash and no staking part, which is all `db-synthesizer` needs.
+ENTERPRISE_TESTNET_HEADER = "60"
+
+# `cardano-cli` writes a key as a CBOR byte string inside a text envelope. The
+# header is 0x58 and then the length, so the raw key starts four hex digits in.
+CBOR_BYTESTRING_HEADER_HEX = 4
+
+
+def parse_args():
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "fixture_dir",
+        nargs="?",
+        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixture"),
+        help="the fixture directory to write into (default: fixture/ beside this script)",
+    )
+    p.add_argument("--cardano-cli", help="path to a cardano-cli that has the Dijkstra era commands")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite keys/ if it already holds signing keys",
+    )
+    return p.parse_args()
+
+
+def fail(message):
+    print(f"FAIL: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def resolve_cardano_cli(given):
+    """Read the flag, then the environment variable, then PATH."""
+    for candidate in (given, os.environ.get("CARDANO_CLI"), shutil.which("cardano-cli")):
+        if candidate:
+            if not os.access(candidate, os.X_OK):
+                fail(f"{candidate} is not executable")
+            return candidate
+    fail("cannot find cardano-cli. Pass --cardano-cli PATH, set CARDANO_CLI, or put it on PATH.")
+
+
+def cli(cardano_cli, *args):
+    """Run one `cardano-cli dijkstra` command and return its output."""
+    out = subprocess.run([cardano_cli, "dijkstra", *args], capture_output=True, text=True)
+    if out.returncode != 0:
+        fail(f"cardano-cli dijkstra {' '.join(args)} failed:\n{out.stderr.strip()}")
+    return out.stdout.strip()
+
+
+def raw_key(path):
+    """The key bytes of a text envelope, without the CBOR byte-string header."""
+    with open(path) as f:
+        return json.load(f)["cborHex"][CBOR_BYTESTRING_HEADER_HEX:]
+
+
+def generate_keys(cardano_cli, keys):
+    """Write every credential that the fixture needs into `keys`."""
+    os.makedirs(keys, exist_ok=True)
+    k = lambda name: os.path.join(keys, name)
+
+    cli(
+        cardano_cli, "node", "key-gen",
+        "--cold-verification-key-file", k("cold.vkey"),
+        "--cold-signing-key-file", k("cold.skey"),
+        "--operational-certificate-issue-counter-file", k("opcert.counter"),
+    )
+    cli(
+        cardano_cli, "node", "key-gen-VRF",
+        "--verification-key-file", k("vrf.vkey"),
+        "--signing-key-file", k("vrf.skey"),
+    )
+    cli(
+        cardano_cli, "node", "key-gen-KES",
+        "--verification-key-file", k("kes.vkey"),
+        "--signing-key-file", k("kes.skey"),
+    )
+    cli(
+        cardano_cli, "node", "key-gen-BLS",
+        "--verification-key-file", k("bls.vkey"),
+        "--signing-key-file", k("bls.skey"),
+    )
+    cli(
+        cardano_cli, "node", "issue-op-cert",
+        "--kes-verification-key-file", k("kes.vkey"),
+        "--cold-signing-key-file", k("cold.skey"),
+        "--operational-certificate-issue-counter-file", k("opcert.counter"),
+        "--kes-period", str(KES_PERIOD),
+        "--out-file", k("opcert.json"),
+    )
+    cli(
+        cardano_cli, "node", "issue-pop-BLS",
+        "--bls-signing-key-file", k("bls.skey"),
+        "--out-file", k("bls.pop"),
+    )
+    cli(
+        cardano_cli, "address", "key-gen",
+        "--verification-key-file", k("payment.vkey"),
+        "--signing-key-file", k("payment.skey"),
+    )
+
+    for name in os.listdir(keys):
+        if name.endswith(".skey"):
+            os.chmod(os.path.join(keys, name), 0o600)
+
+
+def rewrite_genesis(cardano_cli, genesis_path, keys):
+    """Point the genesis at the keys. Returns what it wrote, for the report."""
+    k = lambda name: os.path.join(keys, name)
+
+    pool_id = cli(
+        cardano_cli, "stake-pool", "id",
+        "--cold-verification-key-file", k("cold.vkey"),
+        "--output-format", "hex",
+    )
+    vrf_hash = cli(
+        cardano_cli, "node", "key-hash-VRF",
+        "--verification-key-file", k("vrf.vkey"),
+    )
+    payment_hash = hashlib.blake2b(
+        bytes.fromhex(raw_key(k("payment.vkey"))), digest_size=28
+    ).hexdigest()
+    payment_address = ENTERPRISE_TESTNET_HEADER + payment_hash
+
+    with open(genesis_path) as f:
+        genesis = json.load(f)
+
+    pools = genesis.get("staking", {}).get("pools", {})
+    if len(pools) != 1:
+        fail(f"{genesis_path} registers {len(pools)} pools, and this script expects exactly one")
+    pool = next(iter(pools.values()))
+
+    pool["poolId"] = pool_id
+    pool["vrf"] = vrf_hash
+    pool["leiosKey"] = {
+        "leiosPubKey": raw_key(k("bls.vkey")),
+        "leiosPossessionProof": raw_key(k("bls.pop")),
+    }
+    genesis["staking"]["pools"] = {pool_id: pool}
+
+    stake = genesis.get("staking", {}).get("stake", {})
+    if not stake:
+        fail(f"{genesis_path} delegates no stake, so the pool would hold none")
+    genesis["staking"]["stake"] = {credential: pool_id for credential in stake}
+
+    funds = genesis.setdefault("initialFunds", {})
+    # A rerun makes a new payment key, so drop the entry of the key before it.
+    for address in [a for a in funds if a.startswith(ENTERPRISE_TESTNET_HEADER) and funds[a] == PAYMENT_BALANCE]:
+        del funds[address]
+    funds[payment_address] = PAYMENT_BALANCE
+
+    total = sum(funds.values())
+    supply = genesis.get("maxLovelaceSupply", 0)
+    if total > supply:
+        fail(f"initialFunds totals {total} lovelace, over the maxLovelaceSupply of {supply}")
+
+    with open(genesis_path, "w") as f:
+        json.dump(genesis, f, indent=2)
+        f.write("\n")
+
+    return {
+        "poolId": pool_id,
+        "vrf": vrf_hash,
+        "payment address": payment_address,
+        "initialFunds total": f"{total} of {supply} lovelace",
+    }
+
+
+def main():
+    args = parse_args()
+    cardano_cli = resolve_cardano_cli(args.cardano_cli)
+
+    fixture = args.fixture_dir
+    genesis_path = os.path.join(fixture, "shelley-genesis.json")
+    if not os.path.isfile(genesis_path):
+        fail(f"{genesis_path} does not exist")
+    keys = os.path.join(fixture, "keys")
+
+    existing = [n for n in os.listdir(keys)] if os.path.isdir(keys) else []
+    if any(n.endswith(".skey") for n in existing) and not args.force:
+        fail(f"{keys} already holds signing keys. Pass --force to replace them.")
+
+    print(f"cardano-cli: {cardano_cli}")
+    print(f"fixture:     {fixture}")
+    print()
+
+    generate_keys(cardano_cli, keys)
+    written = rewrite_genesis(cardano_cli, genesis_path, keys)
+
+    for name, value in written.items():
+        print(f"{name:<20} {value}")
+    print()
+    print("Now run check-synth-fixture.")
+
+
+if __name__ == "__main__":
+    main()
