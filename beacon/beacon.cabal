@@ -1,6 +1,6 @@
 cabal-version:   3.0
 name:            beacon
-version:         0.3.0.0
+version:         0.4.0.0
 synopsis:        Benchmarking, exploration, and analysis of Consensus.
 description:
   Tool that can be used to compare the performance of two consensus versions, through `ouroboros-consensus:db-analyser`.
@@ -8,7 +8,11 @@ description:
 license:         Apache-2.0
 license-files:
   LICENSE
+  LICENSE_easyplot
   NOTICE
+
+-- The module app/Graphics/EasyPlot.hs is a forked, and heavily modded,
+-- version of the easyplot-1.0 package by Julian Bertram.
 
 copyright:       2023-2026 Intersect.
 author:          IOHK Engineering Team
@@ -32,6 +36,7 @@ executable beacon
     Cardano.Beacon.RunMeta
     Cardano.Beacon.SlotDataPoint
     Cardano.Beacon.Types
+    Graphics.EasyPlot
     Paths_beacon
 
   autogen-modules:    Paths_beacon
@@ -57,8 +62,6 @@ executable beacon
     , bytestring
     , cabal-plan
     , cardano-slotting
-    , Chart                 >=1.9
-    , Chart-cairo           >=1.9
     , containers
     , directory
     , extra

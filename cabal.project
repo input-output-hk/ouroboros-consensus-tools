@@ -16,6 +16,3 @@ index-state:
 
 packages:
   ./beacon
-
-allow-newer:
-  , cairo:base

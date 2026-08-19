@@ -19,6 +19,7 @@ import           Cardano.Beacon.SlotDataPoint
 import           Cardano.Beacon.Types
 import           Cardano.Slotting.Slot (SlotNo (..))
 import           Control.Arrow ((>>>))
+import           Control.Exception (finally)
 import           Control.Monad (forM_, unless, when)
 import           Data.Maybe (isNothing, mapMaybe)
 import           Data.Ord (Down (Down), comparing)
@@ -27,14 +28,15 @@ import qualified Data.Set as Set
 import           Data.Vector (Vector)
 import qualified Data.Vector as V
 import           Data.Vector.Algorithms.Merge (sortBy)
-import qualified Graphics.Rendering.Chart.Backend.Cairo as Chart.Cairo
-import           Graphics.Rendering.Chart.Easy ((.=))
-import qualified Graphics.Rendering.Chart.Easy as Chart
+import qualified Graphics.EasyPlot as EasyPlot
 import           Numeric
 import           Prelude hiding (putStr, putStrLn)
 import qualified Statistics.Function as Stat
 import qualified Statistics.Quantile as Stat
 import qualified Statistics.Sample as Stat
+import           System.Directory (doesFileExist, getFileSize,
+                     getTemporaryDirectory, removeFile)
+import           System.FilePath ((<.>), (</>))
 
 
 doCompare :: Chains -> BeaconRun -> Maybe BeaconRun -> IO ()
@@ -48,10 +50,11 @@ doCompare chains runA_@BeaconRun{rMeta = metaA} mRunB
             printStyled StyleFatal "meaningful comparisons between runs on different chain fragments is currently not supported"
         | otherwise -> do
           let runB = postProc runB_
-          compareMeasurements True runA runB selMutForecast
-          compareMeasurements True runA runB selMutBlockApply
-          compareMeasurements True runA runB selMutTotalTime
-          compareMeasurements True runA runB selTotalOverMut
+          gnuplotOk <- probeGnuplot
+          compareMeasurements gnuplotOk runA runB selMutForecast
+          compareMeasurements gnuplotOk runA runB selMutBlockApply
+          compareMeasurements gnuplotOk runA runB selMutTotalTime
+          compareMeasurements gnuplotOk runA runB selTotalOverMut
 
           summarizeOne runA
           summarizeOne runB
@@ -82,11 +85,13 @@ doVariance :: [BeaconRun] -> IO ()
 doVariance [] =
   printStyled StyleWarning "doVariance: empty list of beacon runs"
 doVariance runs = do
-  forM_ selectors $ \selector ->
-    let
-      title = selName selector
-      fName = "variance-" ++ slug ++ "-" ++ title ++ ".png"
-    in plotMeasurements' runs (ChartTitle title) selector Nothing fName
+  gnuplotOk <- probeGnuplot
+  when gnuplotOk $
+    forM_ selectors $ \selector ->
+      let
+        title = selName selector
+        fName = "variance-" ++ slug ++ "-" ++ title ++ ".png"
+      in plotMeasurements' runs (PlotTitle title) selector Nothing fName
   where
     slug = toSlug $ rMeta $ head runs
     selectors =
@@ -287,7 +292,7 @@ compareMeasurements emitPlots runA runB selector@(Selector header _ _ _) = do
 
     when emitPlots $
       plotMeasurements
-        (ChartTitle header)
+        (PlotTitle header)
         selector
         (Just outliers)
         runA
@@ -369,10 +374,49 @@ sortAscendingWithSlot df = V.zip (df .> selSlot)
 -- Output data plotting functions
 --------------------------------------------------------------------------------
 
-newtype ChartTitle = ChartTitle String
+newtype PlotTitle = PlotTitle String
+
+-- | Functionally probes whether gnuplot (invoked through 'Graphics.EasyPlot')
+-- can actually render a PNG on this host: writes a trivial two-point dataset
+-- to a scratch file and checks both gnuplot's own exit code and that a
+-- non-empty file was actually produced, rather than merely checking a
+-- @gnuplot@ binary resolves on PATH. Deliberately independent of
+-- 'Cardano.Beacon.Types.EnvironmentCapabilities' /
+-- 'Cardano.Beacon.Run.RunEnvironment': whether
+-- plots can be drawn has nothing to do with the db-analyser build being
+-- benchmarked, so keeping this probe separate means it costs nothing on the
+-- run path and is only ever paid for (once per 'doCompare'/'doVariance' call)
+-- when plotting is about to happen anyway.
+probeGnuplot :: IO Bool
+probeGnuplot = do
+  tmpDir <- getTemporaryDirectory
+  let probeFile = tmpDir </> "beacon-gnuplot-probe" <.> beaconProcessID <.> "png"
+  produced <- runProbe probeFile `finally` cleanup probeFile
+  unless produced $
+    printStyled StyleWarning
+      "gnuplot probe failed (missing binary, or PNGCairo terminal not working); skipping plots for this run"
+  pure produced
+  where
+    runProbe probeFile = do
+      ok <- EasyPlot.plot (EasyPlot.PNGCairo probeFile) $
+        EasyPlot.Data2D [] [] [(1 :: Double, 1 :: Double), (2, 2)]
+      if ok then fileNonEmpty probeFile else pure False
+
+    fileNonEmpty f = do
+      exists <- doesFileExist f
+      if exists then (> 0) <$> getFileSize f else pure False
+
+    cleanup f = do
+      exists <- doesFileExist f
+      when exists $ removeFile f
+
+-- | Colors cycled across an arbitrary number of runs.
+plotColors :: [EasyPlot.Color]
+plotColors = cycle
+  [EasyPlot.Blue, EasyPlot.Red, EasyPlot.Green, EasyPlot.Magenta, EasyPlot.Cyan]
 
 plotMeasurements ::
-     ChartTitle
+     PlotTitle
   -> Selector
   -> Maybe (Set Double)
      -- ^ Slots to exclude from the plot, e.g. outliers or a leading range
@@ -381,46 +425,57 @@ plotMeasurements ::
   -> BeaconRun
   -> FilePath
   -> IO ()
-plotMeasurements (ChartTitle title) selector mExcludedSlots runA runB outfile = do
+plotMeasurements (PlotTitle title) selector mExcludedSlots runA runB outfile = do
     let slotXvalue run = V.toList
                        $ V.filter (notExcluded mExcludedSlots . fst)
                        $ V.zip (run .> selSlot) (run .> selector)
         slotXvalueA = slotXvalue runA
         slotXvalueB = slotXvalue runB
-    Chart.Cairo.toFile Chart.def outfile $ do
-      Chart.layout_title .= title
-      Chart.setColors [Chart.opaque Chart.blue, Chart.opaque Chart.red]
-      Chart.plot (Chart.points (toSlug $ rMeta runA) slotXvalueA)
-      Chart.plot (Chart.points (toSlug $ rMeta runB) slotXvalueB)
+
+    plotOk <- EasyPlot.plot'
+      [EasyPlot.Preamble ["set title " ++ show title]]
+      (EasyPlot.mkTerminal (EasyPlot.PNGCairo outfile))
+      [ EasyPlot.Data2D
+          [ EasyPlot.Title (toSlug $ rMeta runA)
+          , EasyPlot.Color EasyPlot.Blue
+          , EasyPlot.Style EasyPlot.Points
+          ] [] slotXvalueA
+      , EasyPlot.Data2D
+          [ EasyPlot.Title (toSlug $ rMeta runB)
+          , EasyPlot.Color EasyPlot.Red
+          , EasyPlot.Style EasyPlot.Points
+          ] [] slotXvalueB
+      ]
+    unless plotOk $
+      printStyled StyleWarning $ "gnuplot failed to render " ++ outfile
   where
     notExcluded Nothing      _ = True
     notExcluded (Just slots) s = s `Set.notMember` slots
 
 plotMeasurements' ::
      [BeaconRun]
-  -> ChartTitle
+  -> PlotTitle
   -> Selector
   -> Maybe (Set Double)
      -- ^ Slots to exclude from the plot, e.g. outliers or a leading range
      -- ('Nothing' means exclude none, i.e. plot all slots).
   -> FilePath
   -> IO ()
-plotMeasurements' runs (ChartTitle title) selector mExcludedSlots outfile =
-  Chart.Cairo.toFile Chart.def outfile $ do
-    Chart.layout_title .= title
-    Chart.setColors
-      [ Chart.opaque Chart.blue
-      , Chart.opaque Chart.red
-      , Chart.opaque Chart.green
-      , Chart.opaque Chart.magenta
-      , Chart.opaque Chart.cyan
-      ]
-    mapM_ Chart.plot
-      [ Chart.points name points
-        | (run, ix) <- zip runs [1 :: Int ..]
-          , let name    = "run " ++ show ix
-          , let points  = valuesBySlot run
-      ]
+plotMeasurements' runs (PlotTitle title) selector mExcludedSlots outfile = do
+  plotOk <- EasyPlot.plot'
+    [EasyPlot.Preamble ["set title " ++ show title]]
+    (EasyPlot.mkTerminal (EasyPlot.PNGCairo outfile))
+    [ EasyPlot.Data2D
+        [ EasyPlot.Title name
+        , EasyPlot.Color color
+        , EasyPlot.Style EasyPlot.Points
+        ] [] points
+      | ((run, ix), color) <- zip (zip runs [1 :: Int ..]) plotColors
+        , let name   = "run " ++ show ix
+        , let points = valuesBySlot run
+    ]
+  unless plotOk $
+    printStyled StyleWarning $ "gnuplot failed to render " ++ outfile
   where
     valuesBySlot run =
         V.toList
