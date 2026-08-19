@@ -223,6 +223,20 @@ jobs:
               grep -q "already built and linked" /tmp/build
               grep -q "found commit in cache" /tmp/build
 
+              # The hardware report must emit parseable JSON on every one of
+              # these, degrading field by field rather than failing.
+              /tmp/glue sysinfo /tmp/data > /tmp/sysinfo.json
+              head -20 /tmp/sysinfo.json
+              # No parser is guaranteed present in these images, so check the
+              # shape crudely but meaningfully.
+              grep -q "\"schemaVersion\": 1" /tmp/sysinfo.json
+              grep -q "\"physicalDevices\"" /tmp/sysinfo.json
+              tail -1 /tmp/sysinfo.json | grep -q "^}$"
+
+              # The fragment table must be readable without any of it being
+              # downloaded.
+              /tmp/glue fetch -l | grep -q "107-praos-768k"
+
               # The bundled helpers are present. That the launcher actually puts
               # them ahead of the host on PATH is only observable once beacon
               # probes its capabilities, which happens on a real run -- so it is
@@ -259,3 +273,52 @@ jobs:
           cat /tmp/out
           grep -q "needs 'tar'" /tmp/out
           grep -q "dnf install -y tar gzip" /tmp/out
+
+  # The first run that actually exercises db-analyser end to end. Downloads a
+  # ~770 MiB fragment, so it is manual rather than on every push -- but it is
+  # the only thing that proves the bundled jq and GNU time are the ones beacon
+  # picks up, since that is only observable once capabilities are probed.
+  end-to-end:
+    name: Full benchmark (downloads a chain)
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: glue-x86_64-linux
+          path: /tmp/artifact
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo rm -rf /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      - name: Fetch a fragment and benchmark it
+        run: |
+          set -euo pipefail
+          chmod +x /tmp/artifact/glue
+          export GLUE_HOME=/tmp/glue-home
+
+          /tmp/artifact/glue provision /tmp/data
+          /tmp/artifact/glue fetch -n 107-praos-768k -d /tmp/data
+          /tmp/artifact/glue sysinfo /tmp/data | tee /tmp/sysinfo.json | head -40
+
+          # Only the in-memory apply configuration, to keep this bounded; the
+          # full matrix is what an SPO runs.
+          /tmp/artifact/glue benchmark -d /tmp/data --apply-only 2>&1 | tee /tmp/bench.log
+
+          # GNU time was found, so memory and I/O figures were collected. Its
+          # absence is a warning rather than an error, which is exactly why it
+          # needs asserting.
+          if grep -q "time -v' unavailable" /tmp/bench.log; then
+            echo "::error::the bundled GNU time was not picked up"
+            exit 1
+          fi
+          grep -q "Summary for" /tmp/bench.log
+
+          echo "--- stored runs ---"
+          ls /tmp/data/run

@@ -108,6 +108,13 @@
     GLUE_ROOT="$DIR"
     export GLUE_ROOT
 
+    # The bundled curl would otherwise look for CA certificates at a nix store
+    # path that does not exist here.
+    CURL_CA_BUNDLE="$DIR/share/ca-bundle.crt"
+    export CURL_CA_BUNDLE
+    SSL_CERT_FILE="$CURL_CA_BUNDLE"
+    export SSL_CERT_FILE
+
     # Subcommands implemented as scripts rather than by beacon. They decide
     # *which* configurations to measure and how the data directory is prepared,
     # which is policy that changes more often than beacon does -- and being
@@ -120,6 +127,14 @@
       provision)
         shift
         exec "$DIR/scripts/glue-provision.sh" "$@"
+        ;;
+      fetch)
+        shift
+        exec "$DIR/scripts/glue-fetch-chain.sh" "$@"
+        ;;
+      sysinfo)
+        shift
+        exec "$DIR/scripts/spo-sysinfo.sh" "$@"
         ;;
     esac
 

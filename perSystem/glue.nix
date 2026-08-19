@@ -90,6 +90,19 @@
         # RHEL.
         install -m755 ${pkgs.jq}/bin/jq             $out/bin/jq
 
+        # Chain acquisition. Bundled rather than required of the host: curl is
+        # absent from Debian netinst and minimal container images, and unzip is
+        # a separate package on every distribution. Bundling both is ~2 MiB and
+        # keeps chains-v1 usable as published.
+        install -m755 ${pkgs.curl}/bin/curl         $out/bin/curl
+        install -m755 ${pkgs.unzip}/bin/unzip       $out/bin/unzip
+
+        # nixpkgs curl looks for CA certificates at a store path that will not
+        # exist on the target, so HTTPS would fail. The risk this pins is
+        # bounded: every fragment is checked against a sha256 baked into the
+        # table, so TLS is defence in depth rather than the integrity guarantee.
+        cp ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt $out/share/ca-bundle.crt
+
         # shellNixBuildVersion skips nix entirely when
         # <data-dir>/bin/<sha9>-<compiler>/bin/db-analyser already exists, and
         # then readlinks that directory -- so what gets staged into the data
@@ -107,9 +120,14 @@
         ANALYZER_COMPILER=${compilerTag}
         EOF
 
-        cp ${../scripts/glue-provision.sh}  $out/scripts/glue-provision.sh
-        cp ${../scripts/glue-benchmark.sh}  $out/scripts/glue-benchmark.sh
+        cp ${../scripts/glue-provision.sh}    $out/scripts/glue-provision.sh
+        cp ${../scripts/glue-benchmark.sh}    $out/scripts/glue-benchmark.sh
+        cp ${../scripts/glue-fetch-chain.sh}  $out/scripts/glue-fetch-chain.sh
+        cp ${../scripts/spo-sysinfo.sh}       $out/scripts/spo-sysinfo.sh
         chmod +x $out/scripts/*.sh
+
+        cp ${../data/chains.tsv}     $out/share/chains.tsv
+        cp ${../data/chains.baseurl} $out/share/chains.baseurl
       '';
 
       meta.mainProgram = "beacon";

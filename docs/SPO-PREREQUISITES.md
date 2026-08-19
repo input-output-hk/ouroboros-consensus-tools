@@ -50,6 +50,11 @@ turned out not to be:
 - **`jq`.** Not in base on Debian, Ubuntu or RHEL, and beacon reshapes
   db-analyser's output through it. Bundled, and the launcher puts the bundled
   copy ahead of any host one on `PATH`.
+- **`curl` and `unzip`.** curl is absent from Debian netinst and minimal
+  container images; unzip is a separate package everywhere. Both bundled, along
+  with a CA bundle — nixpkgs curl looks for certificates at a store path that
+  does not exist on the target. Note the integrity guarantee does not rest on
+  TLS: every fragment is checked against a sha256 baked into the release.
 - **All shared libraries** the binaries need: `libstdc++`, `libgmp`, `libffi`,
   `libnuma`, `libgcc_s`, `liburing`, `libsodium`, `libblst`, `libsecp256k1`.
   This list is derived from the loader's own resolution at build time, not
@@ -75,6 +80,9 @@ Not yet tested: aarch64 of any kind, and darwin.
 
 ```
 ./glue provision            # prepare ./glue-data (idempotent)
+./glue fetch -l             # list available chain fragments
+./glue fetch                # download and register one (~800 MiB)
+./glue sysinfo              # hardware report as JSON on stdout
 ./glue benchmark            # run the matrix and print summaries
 ./glue <anything else>      # passed straight to beacon
 ```
@@ -108,10 +116,12 @@ directory and re-run to relocate it.
 These are planned and **not** part of the current artifact. They will add host
 requirements when they land:
 
-- **chain fetching** (`curl` or `wget`, plus `sha256sum`) — currently the
-  chain must be placed and registered by hand
-- **hardware reporting** (`awk`, `sed`; optional `lsblk`, `findmnt`,
-  `systemd-detect-virt`, `smartctl`, `nvme` for fuller detail)
+- **fuller hardware detail.** `sysinfo` reports what the kernel exposes
+  without help. `findmnt` sharpens the filesystem and mount-option fields,
+  `systemd-detect-virt` the virtualisation one, and `lscpu` the NUMA count.
+  Where they are absent the affected fields appear in the report's
+  `unavailable` list with a reason rather than being silently omitted. Fields
+  needing root are reported the same way.
 
 ## Keeping this honest
 
