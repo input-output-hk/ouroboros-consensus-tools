@@ -32,6 +32,35 @@
 
     beacon = hsPkgs.beacon.components.exes.beacon;
 
+    # The cabal plan db-analyser was built from. beacon reads
+    # <installPlanPath>/plan.json to record which ouroboros-consensus, ledger
+    # and plutus versions produced a measurement. Without it mkManifest warns
+    # and continues with an empty Manifest -- survivable, but the report then
+    # cannot say what it measured.
+    planNix =
+      consensus.legacyPackages.${system}.hsPkgs.ouroboros-consensus.project.plan-nix;
+
+    # nix reports lastModifiedDate as YYYYMMDDhhmmss; beacon parses
+    # ciCommitDate as a UTCTime, so hand it ISO 8601.
+    isoDate = d:
+      lib.concatStrings [
+        (builtins.substring 0 4 d)
+        "-"
+        (builtins.substring 4 2 d)
+        "-"
+        (builtins.substring 6 2 d)
+        "T"
+        (builtins.substring 8 2 d)
+        ":"
+        (builtins.substring 10 2 d)
+        ":"
+        (builtins.substring 12 2 d)
+        "Z"
+      ];
+
+    analyzerSha = consensus.rev or "0000000000000000000000000000000000000000";
+    analyzerDate = isoDate (consensus.lastModifiedDate or "19700101000000");
+
     # GNU time supplies the peak-RSS and block-I/O figures beacon reports. It
     # is bundled rather than assumed because `/usr/bin/time` is a separate
     # package on every distribution and frequently absent, and the shell's
@@ -43,10 +72,38 @@
       dontUnpack = true;
 
       installPhase = ''
-        mkdir -p $out/bin $out/share
+        mkdir -p $out/bin $out/share $out/analyzer/bin $out/scripts
+
         install -m755 ${beacon}/bin/beacon          $out/bin/beacon
         install -m755 ${dbAnalyser}/bin/db-analyser $out/bin/db-analyser
         install -m755 ${pkgs.time}/bin/time         $out/bin/time
+
+        # beacon reshapes db-analyser's JSON-lines output, and merges run
+        # metadata, by shelling out to jq (four call sites on the run path).
+        # Bundled rather than assumed: jq is not in base on Debian, Ubuntu or
+        # RHEL.
+        install -m755 ${pkgs.jq}/bin/jq             $out/bin/jq
+
+        # shellNixBuildVersion skips nix entirely when
+        # <data-dir>/bin/<sha9>-<compiler>/bin/db-analyser already exists, and
+        # then readlinks that directory -- so what gets staged into the data
+        # directory has to be a symlink to a directory shaped like this. A
+        # relative symlink back to bin/ avoids carrying a second 72 MiB copy.
+        ln -s ../../bin/db-analyser $out/analyzer/bin/db-analyser
+
+        cp ${planNix}/plan.json $out/share/plan.json
+
+        # Sourceable rather than JSON: the provisioning script needs these and
+        # nothing should have to parse JSON in shell.
+        cat > $out/share/pin.env <<EOF
+        ANALYZER_SHA=${analyzerSha}
+        ANALYZER_DATE=${analyzerDate}
+        ANALYZER_COMPILER=${compilerTag}
+        EOF
+
+        cp ${../scripts/glue-provision.sh}  $out/scripts/glue-provision.sh
+        cp ${../scripts/glue-benchmark.sh}  $out/scripts/glue-benchmark.sh
+        chmod +x $out/scripts/*.sh
       '';
 
       meta.mainProgram = "beacon";

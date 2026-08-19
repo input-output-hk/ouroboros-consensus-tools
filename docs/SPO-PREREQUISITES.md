@@ -47,6 +47,9 @@ turned out not to be:
   absent, and the shell's `time` is a builtin with no `-v`/`-o`. Where it is
   missing, peak-memory and I/O figures are silently *not collected*, which is
   worse than failing — so it is bundled.
+- **`jq`.** Not in base on Debian, Ubuntu or RHEL, and beacon reshapes
+  db-analyser's output through it. Bundled, and the launcher puts the bundled
+  copy ahead of any host one on `PATH`.
 - **All shared libraries** the binaries need: `libstdc++`, `libgmp`, `libffi`,
   `libnuma`, `libgcc_s`, `liburing`, `libsodium`, `libblst`, `libsecp256k1`.
   This list is derived from the loader's own resolution at build time, not
@@ -67,6 +70,21 @@ makes the host's version irrelevant.
 | `debian:12` | 2.36 |
 
 Not yet tested: aarch64 of any kind, and darwin.
+
+## Running it
+
+```
+./glue provision            # prepare ./glue-data (idempotent)
+./glue benchmark            # run the matrix and print summaries
+./glue <anything else>      # passed straight to beacon
+```
+
+`provision` stages what beacon would otherwise obtain from `nix build` and the
+GitHub API: the pinned db-analyser, its build plan, and its resolved commit.
+Nothing reaches the network, and beacon itself is unmodified.
+
+The db-analyser revision is fixed at build time, so `benchmark` supplies
+`--rev` itself; it is not the operator's concern.
 
 ## Disk, memory and time
 
@@ -94,8 +112,6 @@ requirements when they land:
   chain must be placed and registered by hand
 - **hardware reporting** (`awk`, `sed`; optional `lsblk`, `findmnt`,
   `systemd-detect-virt`, `smartctl`, `nvme` for fuller detail)
-- **running a benchmark offline** — the current artifact starts and parses
-  arguments, but still resolves `db-analyser` through nix
 
 ## Keeping this honest
 

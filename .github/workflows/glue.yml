@@ -191,9 +191,32 @@ jobs:
               chmod +x /tmp/glue
               /tmp/glue --help > /tmp/out 2>&1 || { cat /tmp/out; exit 1; }
               head -5 /tmp/out
+
               # Second run must reuse the unpacked tree rather than redo it.
               /tmp/glue --help > /dev/null 2>&1
               test -f /tmp/glue-home/*/.complete
+
+              # The claim phase 2 exists to prove: db-analyser is resolved with
+              # no nix and no network. `beacon build` is the step that would
+              # otherwise shell out to `nix build` and query the GitHub API, so
+              # it succeeding here -- in a container that has neither -- is the
+              # assertion. PATH deliberately excludes anything but the base
+              # system.
+              /tmp/glue provision /tmp/data
+              sha=$(sed -n "s/^ANALYZER_SHA=//p" /tmp/glue-home/*/share/pin.env)
+              env -i PATH=/usr/bin:/bin HOME=/tmp GLUE_HOME=/tmp/glue-home \
+                /tmp/glue --data-dir /tmp/data build --rev "$sha" > /tmp/build 2>&1 \
+                || { cat /tmp/build; exit 1; }
+              cat /tmp/build
+              grep -q "already built and linked" /tmp/build
+              grep -q "found commit in cache" /tmp/build
+
+              # The bundled helpers are present. That the launcher actually puts
+              # them ahead of the host on PATH is only observable once beacon
+              # probes its capabilities, which happens on a real run -- so it is
+              # asserted in phase 3 rather than guessed at here.
+              test -x /tmp/glue-home/*/bin/jq
+              test -x /tmp/glue-home/*/bin/time
             '
 
   # The prerequisites document says the artifact refuses to unpack without tar

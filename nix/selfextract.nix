@@ -99,6 +99,30 @@
     # them for free, so scrub them explicitly.
     unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT
 
+    # beacon locates jq and GNU `time` through PATH, so ours must come first:
+    # jq is absent from base installs, and the host's `time` is usually a shell
+    # builtin with no -v, in which case peak-memory and I/O figures are silently
+    # not collected.
+    PATH="$DIR/bin:$PATH"
+    export PATH
+    GLUE_ROOT="$DIR"
+    export GLUE_ROOT
+
+    # Subcommands implemented as scripts rather than by beacon. They decide
+    # *which* configurations to measure and how the data directory is prepared,
+    # which is policy that changes more often than beacon does -- and being
+    # shell, an operator can read them before trusting them.
+    case "''${1:-}" in
+      benchmark)
+        shift
+        exec "$DIR/scripts/glue-benchmark.sh" "$@"
+        ;;
+      provision)
+        shift
+        exec "$DIR/scripts/glue-provision.sh" "$@"
+        ;;
+    esac
+
     exec "$DIR/bin/beacon" "$@"
     __GLUE_ARCHIVE_BELOW__
   '';
