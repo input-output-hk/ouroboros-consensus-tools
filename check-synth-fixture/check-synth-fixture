@@ -9,6 +9,9 @@ those still runs: the tool reports zero forgers, or it forges a chain in an
 earlier era. Neither outcome fails loudly, so this script checks the whole
 pipeline instead.
 
+The fixture sits in `fixture/` next to this script, so a checkout can run it
+with no argument. Pass a directory to check a different one.
+
 It runs three tools over one fixture directory, then reads what they wrote:
 
 - `db-synthesizer` forges a chain. Its own credentials load, and its blocks
@@ -32,6 +35,9 @@ It runs three tools over one fixture directory, then reads what they wrote:
 - The pool carries a `leiosKey` of two even-length hex strings. The ledger reads
   this field as optional, so a wrong shape degrades to a keyless committee seat
   in silence.
+- `keys/payment.skey` exists, and `initialFunds` holds the address of that key
+  with enough lovelace to pay the fees of a whole run. `db-synthesizer` spends
+  that output to make the transactions that fill its blocks.
 
 `check_keys` compares the genesis against the credentials, which needs
 `cardano-cli`. The checks above are self-consistent, so they hold even when the
@@ -41,6 +47,11 @@ genesis names a pool whose keys nobody holds. These do not:
 - `key-hash-VRF` of the VRF verification key equals the genesis `vrf`.
 - The three credential files carry the envelope types that `db-synthesizer`
   accepts.
+
+`check_analysis` counts the transactions. Every block must carry more than one,
+because `db-synthesizer` chains transactions until the next one no longer fits
+in the block. A block with one transaction means the fill loop stopped early. A
+block with none means the payment key never reached the forge loop.
 
 `check_era` reads the era tag of every block that reached the ImmutableDB. A
 Cardano block is stored as a CBOR 2-list, `[eraTag, block]`, and tag 8 is
@@ -55,6 +66,7 @@ holds the BLS commands.
 
 import argparse
 import collections
+import hashlib
 import json
 import os
 import re
@@ -100,6 +112,15 @@ EXPECTED_ENVELOPE_TYPES = {
     "kes.skey": "KesSigningKey_ed25519_kes_2^6",
 }
 
+# One generated transaction pays a fee of one ada, and a full block holds a few
+# hundred of them. A run of a few thousand blocks therefore costs on the order of
+# a million ada. This floor is far above that.
+MIN_PAYMENT_BALANCE = 100_000_000_000_000
+
+# The fixture that ships next to this script. It is small enough to keep in the
+# repository, so a checkout can run this script with no arguments.
+DEFAULT_FIXTURE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixture")
+
 HEX_RE = re.compile(r"\A[0-9a-f]+\Z")
 FORGER_COUNT_RE = re.compile(r"^--> forger count: (\d+)$", re.M)
 FORGED_RE = re.compile(r"^--> forged and adopted (\d+) blocks; reached SlotNo (\d+)$", re.M)
@@ -113,7 +134,10 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument(
         "fixture_dir",
-        help="directory holding config.json, the genesis files, and keys/",
+        nargs="?",
+        default=DEFAULT_FIXTURE_DIR,
+        help="directory holding config.json, the genesis files, and keys/ "
+        f"(default: {os.path.relpath(DEFAULT_FIXTURE_DIR)})",
     )
     p.add_argument("--blocks", type=int, default=200, help="blocks to forge (default 200)")
     p.add_argument("--work-dir", help="where to write the ChainDB and the tool logs")
@@ -176,6 +200,8 @@ def fixture_paths(fixture_dir):
         "cfg": cfg,
         "genesis": os.path.join(fixture_dir, genesis_name),
         "keys": os.path.join(fixture_dir, "keys"),
+        "payment_skey": os.path.join(fixture_dir, "keys", "payment.skey"),
+        "payment_vkey": os.path.join(fixture_dir, "keys", "payment.vkey"),
     }
 
 
@@ -283,7 +309,72 @@ def check_fixture(paths):
             )
         )
 
+    # `db-synthesizer` spends the output of this key, once for every transaction
+    # it generates. Without the key it forges empty blocks, and without an
+    # `initialFunds` entry it stops on the first slot it leads.
+    results.append(
+        check(
+            "the fixture holds a payment signing key",
+            os.path.isfile(paths["payment_skey"]),
+            paths["payment_skey"],
+        )
+    )
+
+    funds = genesis.get("initialFunds", {})
+    payment_addr = payment_address(paths)
+    results.append(
+        check(
+            "initialFunds holds the address of the payment key",
+            payment_addr is not None and payment_addr in funds,
+            f"address {payment_addr}" if payment_addr else "no payment.vkey to derive it from",
+        )
+    )
+
+    balance = funds.get(payment_addr, 0)
+    results.append(
+        check(
+            "that entry covers the fees of a whole run",
+            balance >= MIN_PAYMENT_BALANCE,
+            f"{balance} lovelace, want at least {MIN_PAYMENT_BALANCE}",
+        )
+    )
+
+    total = sum(funds.values())
+    supply = genesis.get("maxLovelaceSupply", 0)
+    results.append(
+        check(
+            "initialFunds stays inside maxLovelaceSupply",
+            total <= supply,
+            f"{total} of {supply}",
+        )
+    )
+
     return results.count(False), pool
+
+
+def payment_address(paths):
+    """The enterprise address of the fixture's payment key, as initialFunds spells it.
+
+    A Shelley address is a header byte and then the payment credential. Header
+    0x60 is an enterprise address (type 6) on the testnet (network 0), which
+    carries a key hash and no staking part. `initialFunds` keys are the raw
+    address bytes in base16, so the entry is "60" and then the key hash.
+
+    This reads the verification key rather than calling `cardano-cli`, so the
+    check runs without it.
+    """
+    try:
+        with open(paths["payment_vkey"]) as f:
+            envelope = json.load(f)
+    except (OSError, ValueError):
+        return None
+    cbor = envelope.get("cborHex", "")
+    # The envelope wraps the 32-byte key in a CBOR byte string: 0x5820 then the key.
+    if not cbor.startswith("5820") or len(cbor) != 4 + 64:
+        return None
+    key = bytes.fromhex(cbor[4:])
+    key_hash = hashlib.blake2b(key, digest_size=28).hexdigest()
+    return "60" + key_hash
 
 
 def check_keys(cardano_cli, paths, pool):
@@ -378,6 +469,8 @@ def check_synthesis(db_synthesizer, paths, db_dir, blocks, work_dir):
             os.path.join(keys, "vrf.skey"),
             "--shelley-kes-key",
             os.path.join(keys, "kes.skey"),
+            "--payment-signing-key",
+            os.path.join(keys, "payment.skey"),
             "-b",
             str(blocks),
             "-f",
@@ -476,9 +569,6 @@ def check_analysis(db_analyser, paths, db_dir, forged, work_dir):
         )
     )
 
-    # The Leios columns are reported, not asserted. Today db-synthesizer passes
-    # no transactions and no certificate, so every column reads 0. When the
-    # forge loop produces endorser blocks, these totals start to move.
     out = run_tool(
         [
             db_analyser,
@@ -493,9 +583,41 @@ def check_analysis(db_analyser, paths, db_dir, forged, work_dir):
         os.path.join(work_dir, "db-analyser-count-tx-outputs.log"),
     )
     rows = EB_COUNT_RE.findall(out)
-    tx_total = sum(int(r[1]) for r in rows)
+    tx_counts = [int(r[1]) for r in rows]
+    tx_total = sum(tx_counts)
     eb_total = sum(int(r[2]) for r in rows)
-    print(f"note  count-tx-outputs: {len(rows)} rows, {tx_total} block txs, {eb_total} EB txs")
+
+    results.append(
+        check(
+            "db-analyser reports a row for every block",
+            len(rows) == forged,
+            f"{len(rows)} rows, {forged} blocks",
+        )
+    )
+
+    results.append(
+        check(
+            "every block carries transactions",
+            bool(tx_counts) and min(tx_counts) > 0,
+            f"{tx_total} transaction outputs, smallest block has {min(tx_counts) if tx_counts else 0}",
+        )
+    )
+
+    # `db-synthesizer` chains transactions until the next one no longer fits
+    # under `blockCapacityTxMeasure`, so a block holds many of them. One per
+    # block would mean the fill loop stopped after its first transaction.
+    results.append(
+        check(
+            "blocks are filled, not carrying a single transaction",
+            bool(tx_counts) and min(tx_counts) > 1,
+            f"smallest block has {min(tx_counts) if tx_counts else 0}, largest has {max(tx_counts) if tx_counts else 0}",
+        )
+    )
+
+    # The EB columns are reported, not asserted. `db-synthesizer` announces no
+    # endorser block yet, so they read 0. When the forge loop announces one,
+    # this note starts to move and becomes a check.
+    print(f"note  count-tx-outputs: {eb_total} EB transaction outputs")
 
     return results.count(False)
 

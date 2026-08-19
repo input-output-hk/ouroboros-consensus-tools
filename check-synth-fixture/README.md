@@ -13,12 +13,9 @@ It belongs to the Leios prototype, which lives on the `leios-prototype` branch o
 
 ## Running it
 
-The script takes one fixture directory.
+The fixture sits in [`fixture/`](fixture/) next to the script, so no path is needed.
 That directory holds `config.json`, the five genesis files it names, and a `keys/` subdirectory.
-
-```sh
-export FIXTURE="/path/to/cardano-node-data/db-synth-leios-test"
-```
+Pass a directory as the one positional argument to check a different fixture.
 
 The script runs the tools and it never builds one.
 For each tool it reads the flag, then the environment variable, then `PATH`.
@@ -36,14 +33,14 @@ It must come from the `leios-prototype` branch of [cardano-cli](https://github.c
 
 ```sh
 export CARDANO_CLI=/path/to/cardano-cli
-check-synth-fixture "$FIXTURE"
+check-synth-fixture
 ```
 
 Without a `cardano-cli`, the script says so and skips those checks.
 `--skip-key-checks` skips them without looking for the binary.
 
 `--blocks N` sets how many blocks to forge, and defaults to 200.
-That takes a few seconds.
+That takes about half a minute, because each block holds a few hundred transactions.
 `--work-dir DIR` chooses where the ChainDB and the tool logs go, instead of a fresh directory under `/tmp`.
 
 ## What it checks
@@ -141,3 +138,18 @@ In `shelley-genesis.json`, set `protocolParams.protocolVersion.major` to 12, the
 Nothing reads `leiosKey` yet.
 The forge loop passes `fbEbTxs = []` and `fbMayLeiosCert = Nothing`, so it produces no endorser block to vote on.
 The field is in the fixture so that the committee seat is keyed once the forge loop can vote.
+
+Last, make the fixture spendable.
+`db-synthesizer` fills each block with transactions that respend one output, and it needs a key that owns that output:
+
+```sh
+cardano-cli address key-gen --verification-key-file "$K/payment.vkey" --signing-key-file "$K/payment.skey"
+cardano-cli address key-hash --payment-verification-key-file "$K/payment.vkey"
+```
+
+Add an `initialFunds` entry for that key in `shelley-genesis.json`.
+The key of the entry is the raw address in base16: header byte `60`, which is an enterprise address on the testnet, and then the 28-byte key hash.
+Give it enough lovelace to pay one ada of fee for every transaction of the run, and keep the `initialFunds` total under `maxLovelaceSupply`.
+`config.json` pins no `ShelleyGenesisHash`, so this edit needs no hash update, and the pseudo-`TxIn` of each existing entry is derived from its own address and does not move.
+
+Without that entry, `db-synthesizer` stops on the first slot it leads.
