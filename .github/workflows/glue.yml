@@ -56,19 +56,26 @@ jobs:
         run: |
           set -euo pipefail
           doc=docs/SPO-PREREQUISITES.md
+
+          # Backticks are stripped up front rather than matched: in GNU grep's
+          # ERE, \` is the start-of-buffer anchor, not an escaped backtick, so a
+          # pattern containing it silently matches nothing -- and under pipefail
+          # that fails the step with no output at all.
+          tr -d '`' < "$doc" > /tmp/doc-plain
+
           grep -oE '^          - image: [^ ]+' .github/workflows/glue.yml \
             | awk '{print $3}' | sort -u > /tmp/matrix
           echo "images tested by this workflow:"; sed 's/^/  /' /tmp/matrix
 
+          grep -oE '(rockylinux|amazonlinux|ubuntu|debian|fedora|alpine):[0-9][^ |]*' \
+            /tmp/doc-plain | sort -u > /tmp/doc-images
+          echo "images the document claims are tested:"; sed 's/^/  /' /tmp/doc-images
+
           missing=0
           while read -r img; do
-            grep -qF "\`$img\`" "$doc" || {
+            grep -qx "$img" /tmp/doc-images || {
               echo "::error::$img is tested but not listed in $doc"; missing=1; }
           done < /tmp/matrix
-
-          # shellcheck disable=SC2016  # backticks are markdown, not substitution
-          grep -oE '\`(rockylinux|amazonlinux|ubuntu|debian|fedora|alpine):[^\`]+\`' "$doc" \
-            | tr -d '`' | sort -u > /tmp/doc-images
           while read -r img; do
             grep -qx "$img" /tmp/matrix || {
               echo "::error::$doc claims $img is tested, but the matrix does not"; missing=1; }
