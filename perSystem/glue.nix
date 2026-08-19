@@ -71,6 +71,12 @@
       version = "0.1.0";
       dontUnpack = true;
 
+      # nix rewrites `#!/bin/sh` to a store bash during fixupPhase, and that
+      # path does not exist on an SPO's machine -- the scripts died with
+      # "bad interpreter". /bin/sh is what they must keep: it is the one
+      # interpreter every target is guaranteed to have.
+      dontPatchShebangs = true;
+
       installPhase = ''
         mkdir -p $out/bin $out/share $out/analyzer/bin $out/scripts
 

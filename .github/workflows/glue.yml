@@ -124,6 +124,18 @@ jobs:
             exit 1
           fi
 
+      # nix's fixupPhase rewrites `#!/bin/sh` to a store bash, which does not
+      # exist on the target. This regressed once and the failure surfaced only
+      # inside a container, so assert it at build time.
+      - name: Shebangs point at the host shell, not the store
+        run: |
+          set -euo pipefail
+          for f in /tmp/tree/scripts/*.sh; do
+            head -1 "$f"
+            head -1 "$f" | grep -qx '#!/bin/sh' || {
+              echo "::error::$(basename "$f") has a rewritten shebang"; exit 1; }
+          done
+
       - name: Build the single-file artifact
         run: |
           set -euo pipefail
