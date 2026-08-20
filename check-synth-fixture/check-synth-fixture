@@ -59,8 +59,14 @@ block with none means the payment key never reached the forge loop.
 
 `check_leios_db` opens the SQLite LeiosDb that `db-synthesizer` writes next to
 the other ChainDB files. `db-analyser` needs that file to start, and it reads the
-transactions of a certified endorser block from it. The row counts are reported,
-not asserted, because the forge loop announces no endorser block yet.
+transactions of a certified endorser block from it.
+
+Every forging opportunity announces an endorser block, so the `ebs` table holds
+one row per block. Each row must report a complete closure, name at least one
+transaction, and carry a body size under the message limit a peer enforces. Each
+`ebTxs` row must name a transaction that the `txs` table holds, because
+`db-analyser` reads the closure through that join and a broken one shows up as a
+short endorser block.
 
 `check_era` reads the era tag of every block that reached the ImmutableDB. A
 Cardano block is stored as a CBOR 2-list, `[eraTag, block]`, and tag 8 is
@@ -121,6 +127,10 @@ EXPECTED_ENVELOPE_TYPES = {
     "vrf.skey": "VrfSigningKey_PraosVRF",
     "kes.skey": "KesSigningKey_ed25519_kes_2^6",
 }
+
+# The largest endorser-block body message a peer accepts. See
+# `maxMsgLeiosBlockBytesSize` in `LeiosDemoTypes.hs`.
+MAX_EB_MESSAGE_BYTES = 500 * 10**3
 
 # The tables of the LeiosDb schema. See `sql_schema` in `LeiosDemoDb/SQLite.hs`,
 # which creates them on the first open of a file.
@@ -517,7 +527,7 @@ def check_synthesis(db_synthesizer, paths, db_dir, blocks, work_dir):
     return results.count(False), forged
 
 
-def check_leios_db(db_dir):
+def check_leios_db(db_dir, forged):
     """Read the LeiosDb that db-synthesizer wrote. Returns the failure count."""
     results = []
     path = os.path.join(db_dir, "leios.db")
@@ -546,19 +556,91 @@ def check_leios_db(db_dir):
                 f"missing {', '.join(missing)}" if missing else ", ".join(sorted(found)),
             )
         )
-        counts = (
-            None
-            if missing
-            else {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in LEIOS_DB_TABLES}
+        if missing:
+            return results.count(False)
+
+        counts = {
+            t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in LEIOS_DB_TABLES
+        }
+
+        results.append(
+            check(
+                "every forged block announces an endorser block",
+                counts["ebs"] == forged,
+                f"{counts['ebs']} announcements, {forged} blocks",
+            )
+        )
+        # Every check below reads the announced rows. With no rows they all pass
+        # on nothing, which reads as a clean run over an empty database.
+        if counts["ebs"] == 0:
+            return results.count(False)
+
+        # `missingTxCount` counts the transactions of the closure that the
+        # LeiosDb still waits for. NULL means the body never arrived, and a
+        # value above 0 means transactions are outstanding. The forger writes
+        # the body and the closure before it returns the announcement, so
+        # neither can happen on a synthesized chain.
+        incomplete = conn.execute(
+            "SELECT COUNT(*) FROM ebs WHERE missingTxCount IS NULL OR missingTxCount > 0"
+        ).fetchone()[0]
+        results.append(
+            check(
+                "every announced endorser block has a complete closure",
+                incomplete == 0,
+                f"{incomplete} of {counts['ebs']} rows are incomplete",
+            )
+        )
+
+        # An endorser block with no transaction is unvotable under CIP-0164, and
+        # `mkAndStoreEb` forges none for an empty list. So a row with no closure
+        # entry means the write path lost them.
+        empty = conn.execute(
+            "SELECT COUNT(*) FROM ebs e"
+            " WHERE NOT EXISTS (SELECT 1 FROM ebTxs t WHERE t.ebHashBytes = e.ebHashBytes)"
+        ).fetchone()[0]
+        results.append(
+            check(
+                "every announced endorser block names transactions",
+                empty == 0,
+                f"{empty} of {counts['ebs']} name none",
+            )
+        )
+
+        # The body travels in one message, so its size has to stay under the
+        # limit that a peer enforces on receipt.
+        largest = conn.execute("SELECT MAX(ebBytesSize) FROM ebs").fetchone()[0]
+        results.append(
+            check(
+                "every announced body fits the wire message limit",
+                largest is not None and largest < MAX_EB_MESSAGE_BYTES,
+                f"largest {largest} bytes, limit {MAX_EB_MESSAGE_BYTES}",
+            )
+        )
+
+        dangling = conn.execute(
+            "SELECT COUNT(*) FROM ebTxs t"
+            " WHERE NOT EXISTS (SELECT 1 FROM txs x WHERE x.txHashBytes = t.txHashBytes)"
+        ).fetchone()[0]
+        results.append(
+            check(
+                "every closure entry names a stored transaction",
+                dangling == 0,
+                f"{dangling} of {counts['ebTxs']} entries dangle",
+            )
         )
     finally:
         conn.close()
 
-    # Reported, not asserted. `db-synthesizer` announces no endorser block yet,
-    # so every table is empty. When the forge loop announces one, this note
-    # starts to move and becomes a check.
-    if counts is not None:
-        print("note  leios.db: " + ", ".join(f"{n} {t}" for t, n in counts.items()))
+    # Reported, not asserted. Each forging opportunity restarts the respend
+    # sequence where its ranking block stopped, so consecutive endorser blocks
+    # share all but the ranking block's own transactions. The LeiosDb pays for
+    # that in copies, and the number falls once a block certifies.
+    copies = counts["ebTxs"] / counts["txs"] if counts["txs"] else 0
+    print(
+        "note  leios.db: "
+        + ", ".join(f"{n} {t}" for t, n in counts.items())
+        + f", {copies:.1f} copies per transaction"
+    )
 
     return results.count(False)
 
@@ -797,7 +879,7 @@ def main():
         print(f"\n{failures} checks failed. No chain to analyse, so the rest did not run.")
         sys.exit(1)
 
-    failures += check_leios_db(db_dir)
+    failures += check_leios_db(db_dir, forged)
     failures += check_immutalisation(db_immutaliser, paths, db_dir, work_dir)
     failures += check_analysis(db_analyser, paths, db_dir, forged, work_dir)
     failures += check_era(db_dir)
