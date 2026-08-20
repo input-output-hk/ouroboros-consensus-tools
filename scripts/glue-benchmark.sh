@@ -115,3 +115,8 @@ done
 
 echo
 echo "all configurations complete; results are under $data_dir/run"
+
+# The measurements are only interpretable alongside the machine that produced
+# them, so the report is assembled here rather than left as a step an operator
+# has to know to take.
+"$GLUE_ROOT/scripts/glue-report.sh" -d "$data_dir"

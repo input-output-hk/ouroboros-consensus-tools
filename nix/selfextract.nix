@@ -136,6 +136,10 @@
         shift
         exec "$DIR/scripts/spo-sysinfo.sh" "$@"
         ;;
+      report)
+        shift
+        exec "$DIR/scripts/glue-report.sh" "$@"
+        ;;
     esac
 
     exec "$DIR/bin/beacon" "$@"

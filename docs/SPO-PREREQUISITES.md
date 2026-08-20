@@ -83,13 +83,20 @@ Not yet tested: aarch64 of any kind, and darwin.
 ./glue fetch -l             # list available chain fragments
 ./glue fetch                # download and register one (~800 MiB)
 ./glue sysinfo              # hardware report as JSON on stdout
-./glue benchmark            # run the matrix and print summaries
+./glue benchmark            # run the matrix, print summaries, write the report
+./glue report               # re-assemble the report from stored runs
 ./glue <anything else>      # passed straight to beacon
 ```
 
 `provision` stages what beacon would otherwise obtain from `nix build` and the
 GitHub API: the pinned db-analyser, its build plan, and its resolved commit.
 Nothing reaches the network, and beacon itself is unmodified.
+
+`benchmark` finishes by writing `glue-report-<host>-<utc>.json` into the data
+directory. **That single file is what to send back.** It carries the
+measurements, the machine they were taken on, and the exact db-analyser build
+that took them — the on-disk figures cannot be interpreted without the hardware
+alongside them, so the two travel together.
 
 The db-analyser revision is fixed at build time, so `benchmark` supplies
 `--rev` itself; it is not the operator's concern.

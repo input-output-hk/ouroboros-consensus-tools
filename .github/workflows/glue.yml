@@ -237,6 +237,13 @@ jobs:
               # downloaded.
               /tmp/glue fetch -l | grep -q "107-praos-768k"
 
+              # With no runs stored yet the report must refuse rather than
+              # emit an empty document that looks like a result.
+              if /tmp/glue report -d /tmp/data > /tmp/rep 2>&1; then
+                echo "::error::report succeeded with no runs stored"; exit 1
+              fi
+              grep -q "no runs found" /tmp/rep
+
               # The bundled helpers are present. That the launcher actually puts
               # them ahead of the host on PATH is only observable once beacon
               # probes its capabilities, which happens on a real run -- so it is
@@ -322,3 +329,33 @@ jobs:
 
           echo "--- stored runs ---"
           ls /tmp/data/run
+
+          # The report is the artifact an SPO sends back, so assert it is whole:
+          # valid JSON, carrying the measurements, the analyzer identity and the
+          # hardware together. Written by concatenation, so a malformed run file
+          # would corrupt the document -- python is used here only as a parser,
+          # and is not required on an SPO's machine.
+          report=$(find /tmp/data -maxdepth 1 -name 'glue-report-*.json' | head -1)
+          test -n "$report"
+          python3 - "$report" <<'PY'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          assert d['reportVersion'] == 1
+          assert d['analyzer']['ciCommitSHA1'], 'analyzer identity missing'
+          assert d['system']['schemaVersion'] == 1
+          runs = d['runs']
+          assert runs, 'no runs in the report'
+          for slug, samples in runs.items():
+              assert samples, f'{slug} has no samples'
+              for s in samples:
+                  assert s['data'], f'{slug} sample has no datapoints'
+          dev = d['system']['dataDir'].get('physicalDevices', [])
+          print('report OK:', {k: len(v) for k, v in runs.items()})
+          print('  analyzer:', d['analyzer']['ciCommitSHA1'][:12])
+          print('  disk    :', d['system']['dataDir'].get('source'),
+                '->', [x.get('name') for x in dev])
+          for x in dev:
+              print('    ', x.get('name'), 'rotational=', x.get('rotational'),
+                    'writeCache=', x.get('writeCache'),
+                    'model=', repr(x.get('model')))
+          PY
