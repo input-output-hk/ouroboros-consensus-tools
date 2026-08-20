@@ -94,8 +94,13 @@ The steps are individually available for anyone who wants them:
 ./glue sysinfo              # hardware report as JSON on stdout
 ./glue benchmark            # measure a registered fragment
 ./glue report               # re-assemble the report from stored runs
-./glue <anything else>      # passed straight to beacon
+./glue beacon ...           # run beacon directly (developer access)
 ```
+
+Anything not named above — including a bare invocation and any leading option —
+runs the whole job. Raw beacon access is explicit, via `glue beacon`, rather
+than a fallthrough: deciding by inspecting arguments against beacon's own
+subcommands would couple the launcher to a CLI it does not own.
 
 Every one of these is a script inside the executable — nothing needs to be
 downloaded alongside it. They are also attached to releases individually so

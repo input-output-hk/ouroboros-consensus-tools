@@ -119,26 +119,18 @@
     # *which* configurations to measure and how the data directory is prepared,
     # which is policy that changes more often than beacon does -- and being
     # shell, an operator can read them before trusting them.
-    # No arguments means "do the whole job". An SPO should not have to know
-    # that provisioning precedes fetching, nor that the report is a separate
-    # artifact from the runs. Falling through to beacon here would have shown
-    # them a developer's usage text instead.
-    if [ $# -eq 0 ]; then
-      exec "$DIR/scripts/glue-run-all.sh"
-    fi
-
+    # Dispatch.
+    #
+    # The rule is deliberately not "anything beacon recognises goes to beacon":
+    # that would mean inspecting argv against beacon's own subcommand list and
+    # global options, which couples this launcher to a CLI it does not own. It
+    # also got `glue --yes` wrong, since a leading option fell through and
+    # beacon rejected it.
+    #
+    # Instead: glue's own subcommands are named, raw beacon access is explicit
+    # via `glue beacon ...`, and everything else -- including no arguments at
+    # all and any leading option -- is the whole job.
     case "''${1:-}" in
-      run|run-all|--help|-h)
-        # `run` is beacon's own subcommand name, but a bare `glue run` reaching
-        # beacon would demand --rev and a chain name; this is what someone
-        # typing it actually wants.
-        case "$1" in --help|-h) ;; *) shift ;; esac
-        exec "$DIR/scripts/glue-run-all.sh" "$@"
-        ;;
-      benchmark)
-        shift
-        exec "$DIR/scripts/glue-benchmark.sh" "$@"
-        ;;
       provision)
         shift
         exec "$DIR/scripts/glue-provision.sh" "$@"
@@ -151,12 +143,27 @@
         shift
         exec "$DIR/scripts/spo-sysinfo.sh" "$@"
         ;;
+      benchmark)
+        shift
+        exec "$DIR/scripts/glue-benchmark.sh" "$@"
+        ;;
       report)
         shift
         exec "$DIR/scripts/glue-report.sh" "$@"
         ;;
+      beacon)
+        # Raw access, for developers and for anything glue does not wrap.
+        shift
+        exec "$DIR/bin/beacon" "$@"
+        ;;
+      run|run-all)
+        shift
+        exec "$DIR/scripts/glue-run-all.sh" "$@"
+        ;;
+      *)
+        exec "$DIR/scripts/glue-run-all.sh" "$@"
+        ;;
     esac
-
     exec "$DIR/bin/beacon" "$@"
     __GLUE_ARCHIVE_BELOW__
   '';

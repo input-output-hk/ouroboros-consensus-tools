@@ -35,7 +35,7 @@ Individual steps, if you would rather drive them yourself:
   glue benchmark   measure a registered fragment
   glue report      re-assemble the report from stored runs
 
-Anything else is passed straight to beacon.
+  glue beacon ...  run beacon directly (developer access)
 EOF
 }
 
@@ -51,7 +51,14 @@ while [ $# -gt 0 ]; do
     -y|--yes) assume_yes=1; shift ;;
     --apply-only|--reapply-only) mode_args="$1"; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) echo "unexpected argument: $1" >&2; echo >&2; usage >&2; exit 1 ;;
+    *)
+      echo "glue: unexpected argument: $1" >&2
+      echo >&2
+      echo "If you meant a beacon subcommand, run it as: glue beacon $* " >&2
+      echo >&2
+      usage >&2
+      exit 1
+      ;;
   esac
 done
 

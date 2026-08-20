@@ -259,6 +259,21 @@ jobs:
               grep -q "Runs the whole benchmark" /tmp/h
               grep -q "glue provision" /tmp/h
 
+              # A leading option must reach the run-all script, not beacon.
+              # `glue --yes` previously fell through and beacon rejected it,
+              # which broke the end-to-end job.
+              if /tmp/glue --yes -d /tmp/nowhere-xyz > /tmp/y 2>&1; then
+                echo "::error::--yes unexpectedly succeeded"; cat /tmp/y; exit 1
+              fi
+              if grep -q "Invalid option" /tmp/y; then
+                echo "::error::--yes reached beacon instead of the run-all script"
+                cat /tmp/y; exit 1
+              fi
+
+              # Raw beacon access stays available, explicitly.
+              /tmp/glue beacon --help > /tmp/b 2>&1 || true
+              grep -q "Usage: beacon" /tmp/b
+
               # The bundled helpers are present. That the launcher actually puts
               # them ahead of the host on PATH is only observable once beacon
               # probes its capabilities, which happens on a real run -- so it is
