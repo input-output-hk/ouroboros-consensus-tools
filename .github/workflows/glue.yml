@@ -216,8 +216,10 @@ jobs:
               # system.
               /tmp/glue provision /tmp/data
               sha=$(sed -n "s/^ANALYZER_SHA=//p" /tmp/glue-home/*/share/pin.env)
+              # `glue beacon` rather than a bare passthrough: glue owns its own
+              # argument space now, and raw beacon access is explicit.
               env -i PATH=/usr/bin:/bin HOME=/tmp GLUE_HOME=/tmp/glue-home \
-                /tmp/glue --data-dir /tmp/data build --rev "$sha" > /tmp/build 2>&1 \
+                /tmp/glue beacon --data-dir /tmp/data build --rev "$sha" > /tmp/build 2>&1 \
                 || { cat /tmp/build; exit 1; }
               cat /tmp/build
               grep -q "already built and linked" /tmp/build
