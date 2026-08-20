@@ -21,14 +21,47 @@
     # Consensus's own hydraJobs naming for the compiler.
     compilerTag = "haskell96";
 
-    supported = system == "x86_64-linux";
+    # Compared as a plain string rather than via pkgs.stdenv: `supported` gates
+    # whether `packages` is defined at all, and using a module argument to
+    # decide which options exist makes the module system recurse -- `pkgs`
+    # itself comes from _module.args.
+    supported = system == "x86_64-linux" || system == "aarch64-linux";
 
-    # Precisely what IOG's Hydra builds and cache.iog.io serves: a ~45 MiB
-    # substitution rather than a source build. `exesNoAsserts` is not
-    # incidental -- assertions sit on the measured path and would skew every
-    # timing we publish.
+    # Whether consensus's flake declares this system. It lists x86_64-linux and
+    # aarch64-darwin; aarch64-linux is commented out in its supportedSystems, so
+    # there is no output to consume and nothing in the cache -- IOG has never
+    # built it.
+    upstreamAvailable = builtins.elem system (builtins.attrNames consensus.hydraJobs);
+
+    # Where consensus builds this system, take precisely what its Hydra builds
+    # and cache.iog.io serves: a ~45 MiB substitution rather than a source
+    # build. `exesNoAsserts` is not incidental -- assertions sit on the measured
+    # path and would skew every timing we publish.
+    #
+    # Where it does not -- aarch64-linux -- instantiate the same project from
+    # source and reproduce that variant's patch. This must happen *on* aarch64:
+    # haskell.nix evaluates Template Haskell splices through
+    # iserv-proxy-interpreter, which has to load the target's object code, and
+    # an x86_64 builder cannot load aarch64 objects. It dies inside libstdc++
+    # with "Failed to lookup symbol: _Unwind_Resume" long before reaching our
+    # code, so this is a native build on an ARM runner, not a cross-compile.
+    consensusFromSource = pkgs.haskell-nix.cabalProject' {
+      src = pkgs.applyPatches {
+        name = "consensus-src-no-asserts";
+        src = consensus;
+        # Consensus disables assertions with a `noAsserts` flake variant that
+        # blanks this file. Reproduced here because we are not going through
+        # their flake.
+        postPatch = "echo > cabal/asserts.cabal";
+      };
+      compiler-nix-name = "ghc967";
+      inputMap = {"https://chap.intersectmbo.org/" = inputs.CHaP;};
+    };
+
     dbAnalyser =
-      consensus.hydraJobs.${system}.native.${compilerTag}.exesNoAsserts.db-analyser;
+      if upstreamAvailable
+      then consensus.hydraJobs.${system}.native.${compilerTag}.exesNoAsserts.db-analyser
+      else consensusFromSource.hsPkgs.ouroboros-consensus.components.exes.db-analyser;
 
     beacon = hsPkgs.beacon.components.exes.beacon;
 
@@ -37,8 +70,14 @@
     # and plutus versions produced a measurement. Without it mkManifest warns
     # and continues with an empty Manifest -- survivable, but the report then
     # cannot say what it measured.
+    # Taken from whichever project produced the analyzer above, rather than
+    # reaching into legacyPackages.${system} -- that attribute does not exist
+    # where consensus does not declare the system, which is precisely the case
+    # the from-source path handles.
     planNix =
-      consensus.legacyPackages.${system}.hsPkgs.ouroboros-consensus.project.plan-nix;
+      if upstreamAvailable
+      then consensus.legacyPackages.${system}.hsPkgs.ouroboros-consensus.project.plan-nix
+      else consensusFromSource.plan-nix;
 
     # nix reports lastModifiedDate as YYYYMMDDhhmmss; beacon parses
     # ciCommitDate as a UTCTime, so hand it ISO 8601.

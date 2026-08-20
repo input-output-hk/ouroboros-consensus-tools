@@ -23,8 +23,26 @@ on:
 
 jobs:
   build:
-    name: Build and relocate (x86_64-linux)
-    runs-on: ubuntu-latest
+    name: Build and relocate (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 350
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            system: x86_64-linux
+            # consensus's flake declares x86_64-linux, so db-analyser
+            # substitutes from cache.iog.io: a ~45 MiB download.
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            system: aarch64-linux
+            # consensus's flake does not declare aarch64-linux, so db-analyser
+            # is built from source here -- natively, because Template Haskell
+            # cannot cross architectures. Expect the better part of an hour on
+            # a cold runner.
+            arch: arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -63,8 +81,11 @@ jobs:
           # that fails the step with no output at all.
           tr -d '`' < "$doc" > /tmp/doc-plain
 
-          grep -oE '^          - image: [^ ]+' .github/workflows/glue.yml \
-            | awk '{print $3}' | sort -u > /tmp/matrix
+          # Only the matrix entries: this file also contains the pattern used
+          # to find them, and grepping itself picked that up as an image name.
+          grep -oE '^ +- \{ runner: [^}]*image: "[^"]+"' .github/workflows/glue.yml \
+            | grep -oE 'image: "[^"]+"' | sed 's/image: //; s/"//g' \
+            | sort -u > /tmp/matrix
           echo "images tested by this workflow:"; sed 's/^/  /' /tmp/matrix
 
           grep -oE '(rockylinux|amazonlinux|ubuntu|debian|fedora|alpine):[0-9][^ |]*' \
@@ -148,7 +169,7 @@ jobs:
       - name: Upload the artifact
         uses: actions/upload-artifact@v4
         with:
-          name: glue-x86_64-linux
+          name: glue-${{ matrix.system }}
           path: |
             /tmp/glue
             /tmp/glue.sha256
@@ -159,23 +180,28 @@ jobs:
   # `beacon --help` starting is the whole assertion; running a benchmark needs
   # offline analyzer resolution, which is phase 2.
   old-distros:
-    name: Runs on ${{ matrix.image }}
-    runs-on: ubuntu-latest
+    name: ${{ matrix.system }} on ${{ matrix.image }}
+    runs-on: ${{ matrix.runner }}
     needs: build
 
     strategy:
       fail-fast: false
       matrix:
         include:
-          - image: rockylinux:8        # glibc 2.28
-          - image: amazonlinux:2023    # glibc 2.34
-          - image: ubuntu:22.04        # glibc 2.35
-          - image: debian:12           # glibc 2.36
+          - { runner: ubuntu-latest,    system: x86_64-linux,  image: "rockylinux:8" }
+          - { runner: ubuntu-latest,    system: x86_64-linux,  image: "amazonlinux:2023" }
+          - { runner: ubuntu-latest,    system: x86_64-linux,  image: "ubuntu:22.04" }
+          - { runner: ubuntu-latest,    system: x86_64-linux,  image: "debian:12" }
+          # Rocky 8 has no official arm64 image on Docker Hub, so aarch64 is
+          # checked against the oldest glibc that does: Ubuntu 22.04 (2.35).
+          - { runner: ubuntu-24.04-arm, system: aarch64-linux, image: "amazonlinux:2023" }
+          - { runner: ubuntu-24.04-arm, system: aarch64-linux, image: "ubuntu:22.04" }
+          - { runner: ubuntu-24.04-arm, system: aarch64-linux, image: "debian:12" }
 
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: glue-x86_64-linux
+          name: glue-${{ matrix.system }}
           path: /tmp/artifact
 
       - name: Start it under ${{ matrix.image }}

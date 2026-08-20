@@ -63,18 +63,24 @@ turned out not to be:
 
 ## Tested platforms
 
-x86_64 only. Every one of these has a glibc older than the `GLIBC_2.38` the
+x86_64 and aarch64. Every one of these has a glibc older than the version the
 binaries require, which is the point: they demonstrate that the bundled glibc
 makes the host's version irrelevant.
 
-| distribution | glibc |
-|---|---|
-| `rockylinux:8` | 2.28 |
-| `amazonlinux:2023` | 2.34 |
-| `ubuntu:22.04` | 2.35 |
-| `debian:12` | 2.36 |
+| distribution | glibc | x86_64 | aarch64 |
+|---|---|---|---|
+| `rockylinux:8` | 2.28 | tested | no official arm64 image |
+| `amazonlinux:2023` | 2.34 | tested | tested |
+| `ubuntu:22.04` | 2.35 | tested | tested |
+| `debian:12` | 2.36 | tested | tested |
 
-Not yet tested: aarch64 of any kind, and darwin.
+Not tested: darwin.
+
+The two architectures are built differently, and it is worth knowing which you
+have. On x86_64, `db-analyser` comes from consensus's own cached build. On
+aarch64, consensus's flake does not declare the system, so it is compiled from
+source — natively on an ARM machine, because Template Haskell cannot cross
+architectures. Same source, same compiler, different provenance.
 
 ## Running it
 
