@@ -125,6 +125,7 @@
         cp ${../scripts/glue-fetch-chain.sh}  $out/scripts/glue-fetch-chain.sh
         cp ${../scripts/spo-sysinfo.sh}       $out/scripts/spo-sysinfo.sh
         cp ${../scripts/glue-report.sh}       $out/scripts/glue-report.sh
+        cp ${../scripts/glue-run-all.sh}      $out/scripts/glue-run-all.sh
         chmod +x $out/scripts/*.sh
 
         cp ${../data/chains.tsv}     $out/share/chains.tsv

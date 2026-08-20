@@ -119,7 +119,22 @@
     # *which* configurations to measure and how the data directory is prepared,
     # which is policy that changes more often than beacon does -- and being
     # shell, an operator can read them before trusting them.
+    # No arguments means "do the whole job". An SPO should not have to know
+    # that provisioning precedes fetching, nor that the report is a separate
+    # artifact from the runs. Falling through to beacon here would have shown
+    # them a developer's usage text instead.
+    if [ $# -eq 0 ]; then
+      exec "$DIR/scripts/glue-run-all.sh"
+    fi
+
     case "''${1:-}" in
+      run|run-all|--help|-h)
+        # `run` is beacon's own subcommand name, but a bare `glue run` reaching
+        # beacon would demand --rev and a chain name; this is what someone
+        # typing it actually wants.
+        case "$1" in --help|-h) ;; *) shift ;; esac
+        exec "$DIR/scripts/glue-run-all.sh" "$@"
+        ;;
       benchmark)
         shift
         exec "$DIR/scripts/glue-benchmark.sh" "$@"

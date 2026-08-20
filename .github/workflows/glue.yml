@@ -244,6 +244,21 @@ jobs:
               fi
               grep -q "no complete runs found" /tmp/rep
 
+              # A bare invocation must do the whole job rather than fall
+              # through to the developer usage of beacon -- but it must refuse
+              # to download ~800 MiB with nobody attached to confirm it.
+              if /tmp/glue < /dev/null > /tmp/bare 2>&1; then
+                echo "::error::bare invocation downloaded without confirmation"
+                cat /tmp/bare; exit 1
+              fi
+              cat /tmp/bare
+              grep -q "Re-run with --yes" /tmp/bare
+
+              # --help must describe the SPO workflow, not the beacon one.
+              /tmp/glue --help > /tmp/h 2>&1
+              grep -q "Runs the whole benchmark" /tmp/h
+              grep -q "glue provision" /tmp/h
+
               # The bundled helpers are present. That the launcher actually puts
               # them ahead of the host on PATH is only observable once beacon
               # probes its capabilities, which happens on a real run -- so it is
@@ -310,13 +325,11 @@ jobs:
           chmod +x /tmp/artifact/glue
           export GLUE_HOME=/tmp/glue-home
 
-          /tmp/artifact/glue provision /tmp/data
-          /tmp/artifact/glue fetch -n 107-praos-768k -d /tmp/data
-          /tmp/artifact/glue sysinfo /tmp/data | tee /tmp/sysinfo.json | head -40
-
-          # Only the in-memory apply configuration, to keep this bounded; the
-          # full matrix is what an SPO runs.
-          /tmp/artifact/glue benchmark -d /tmp/data --apply-only 2>&1 | tee /tmp/bench.log
+          # The single command an SPO actually runs. --yes because nothing is
+          # attached to confirm the download, and --apply-only to keep this
+          # bounded; the full matrix is what an SPO gets by default.
+          /tmp/artifact/glue --yes -d /tmp/data -n 107-praos-768k --apply-only 2>&1 \
+            | tee /tmp/bench.log
 
           # GNU time was found, so memory and I/O figures were collected. Its
           # absence is a warning rather than an error, which is exactly why it

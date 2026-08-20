@@ -79,14 +79,28 @@ Not yet tested: aarch64 of any kind, and darwin.
 ## Running it
 
 ```
+./glue                      # the whole job: prepare, fetch, measure, report
+```
+
+That is all an SPO needs. It confirms before downloading, and refuses rather
+than proceeding unattended — pass `--yes` for cron or scripts.
+
+The steps are individually available for anyone who wants them:
+
+```
 ./glue provision            # prepare ./glue-data (idempotent)
 ./glue fetch -l             # list available chain fragments
 ./glue fetch                # download and register one (~800 MiB)
 ./glue sysinfo              # hardware report as JSON on stdout
-./glue benchmark            # run the matrix, print summaries, write the report
+./glue benchmark            # measure a registered fragment
 ./glue report               # re-assemble the report from stored runs
 ./glue <anything else>      # passed straight to beacon
 ```
+
+Every one of these is a script inside the executable — nothing needs to be
+downloaded alongside it. They are also attached to releases individually so
+they can be read before being trusted, which is why they are shell rather than
+compiled into `beacon`.
 
 `provision` stages what beacon would otherwise obtain from `nix build` and the
 GitHub API: the pinned db-analyser, its build plan, and its resolved commit.
