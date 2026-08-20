@@ -23,7 +23,8 @@ It runs three tools over one fixture directory, then reads what they wrote:
   the ImmutableDB, so without this step it counts nothing.
 - `db-analyser --count-blocks` re-applies every block from genesis. This is the
   strongest check here, because full validation proves the genesis is coherent
-  and not merely well formed.
+  and not merely well formed. It opens the LeiosDb that `db-synthesizer` wrote,
+  not the empty in-memory stub.
 
 `check_fixture` reads the configuration before any tool runs:
 
@@ -56,6 +57,11 @@ because `db-synthesizer` chains transactions until the next one no longer fits
 in the block. A block with one transaction means the fill loop stopped early. A
 block with none means the payment key never reached the forge loop.
 
+`check_leios_db` opens the SQLite LeiosDb that `db-synthesizer` writes next to
+the other ChainDB files. `db-analyser` needs that file to start, and it reads the
+transactions of a certified endorser block from it. The row counts are reported,
+not asserted, because the forge loop announces no endorser block yet.
+
 `check_era` reads the era tag of every block that reached the ImmutableDB. A
 Cardano block is stored as a CBOR 2-list, `[eraTag, block]`, and tag 8 is
 Dijkstra. A forged block proves nothing about the era on its own, because
@@ -74,6 +80,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -114,6 +121,10 @@ EXPECTED_ENVELOPE_TYPES = {
     "vrf.skey": "VrfSigningKey_PraosVRF",
     "kes.skey": "KesSigningKey_ed25519_kes_2^6",
 }
+
+# The tables of the LeiosDb schema. See `sql_schema` in `LeiosDemoDb/SQLite.hs`,
+# which creates them on the first open of a file.
+LEIOS_DB_TABLES = ["ebs", "ebTxs", "txs"]
 
 # One generated transaction pays a fee of one ada, and a full block holds a few
 # hundred of them. A run of a few thousand blocks therefore costs on the order of
@@ -506,6 +517,52 @@ def check_synthesis(db_synthesizer, paths, db_dir, blocks, work_dir):
     return results.count(False), forged
 
 
+def check_leios_db(db_dir):
+    """Read the LeiosDb that db-synthesizer wrote. Returns the failure count."""
+    results = []
+    path = os.path.join(db_dir, "leios.db")
+
+    exists = os.path.isfile(path)
+    results.append(
+        check(
+            "db-synthesizer writes a LeiosDb next to the ChainDB",
+            exists,
+            path if exists else f"{path} is missing",
+        )
+    )
+    if not exists:
+        return results.count(False)
+
+    # Read-only. The SQLite backend opens with `SQLOpenCreate`, so a plain
+    # connect would write an empty database into the node's directory.
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        found = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        missing = [t for t in LEIOS_DB_TABLES if t not in found]
+        results.append(
+            check(
+                "the LeiosDb holds the tables of the schema",
+                not missing,
+                f"missing {', '.join(missing)}" if missing else ", ".join(sorted(found)),
+            )
+        )
+        counts = (
+            None
+            if missing
+            else {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in LEIOS_DB_TABLES}
+        )
+    finally:
+        conn.close()
+
+    # Reported, not asserted. `db-synthesizer` announces no endorser block yet,
+    # so every table is empty. When the forge loop announces one, this note
+    # starts to move and becomes a check.
+    if counts is not None:
+        print("note  leios.db: " + ", ".join(f"{n} {t}" for t, n in counts.items()))
+
+    return results.count(False)
+
+
 def check_immutalisation(db_immutaliser, paths, db_dir, work_dir):
     """Copy the chain into the ImmutableDB. Returns the failure count."""
     results = []
@@ -553,7 +610,6 @@ def check_analysis(db_analyser, paths, db_dir, forged, work_dir):
             "--db",
             db_dir,
             "--in-mem",
-            "--stubbed-leios-db",
             "--db-validation",
             "validate-all-blocks",
             "--count-blocks",
@@ -579,7 +635,6 @@ def check_analysis(db_analyser, paths, db_dir, forged, work_dir):
             "--db",
             db_dir,
             "--in-mem",
-            "--stubbed-leios-db",
             "--count-tx-outputs",
             "--config",
             paths["config"],
@@ -742,6 +797,7 @@ def main():
         print(f"\n{failures} checks failed. No chain to analyse, so the rest did not run.")
         sys.exit(1)
 
+    failures += check_leios_db(db_dir)
     failures += check_immutalisation(db_immutaliser, paths, db_dir, work_dir)
     failures += check_analysis(db_analyser, paths, db_dir, forged, work_dir)
     failures += check_era(db_dir)
