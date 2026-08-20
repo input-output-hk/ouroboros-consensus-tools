@@ -47,11 +47,35 @@ if [ -z "${GLUE_ROOT:-}" ]; then
 fi
 export GLUE_ROOT
 
-[ -d "$data_dir/run" ] || {
-  echo "glue-report: no runs found under $data_dir/run" >&2
+# Collect the whole run files first, and refuse if there are none. The
+# directory existing proves nothing -- provisioning creates it -- and an empty
+# report would look like a result rather than an error.
+#
+# A run-NNN.json that is present but unparseable would corrupt the enclosing
+# document, since this assembles by concatenation, so each is checked for a
+# closing brace here rather than mid-write.
+runlist="${TMPDIR:-/tmp}/glue-report-runs.$$"
+: > "$runlist"
+trap 'rm -f "$runlist"' EXIT INT TERM
+
+if [ -d "$data_dir/run" ]; then
+  for slug_dir in "$data_dir"/run/*; do
+    [ -d "$slug_dir" ] || continue
+    for f in "$slug_dir"/run-*.json; do
+      [ -f "$f" ] || continue
+      case "$(tail -c 3 "$f" | tr -d ' \n')" in
+        *'}') printf '%s\t%s\n' "$(basename "$slug_dir")" "$f" >> "$runlist" ;;
+        *) echo "glue-report: skipping truncated $f" >&2 ;;
+      esac
+    done
+  done
+fi
+
+if [ ! -s "$runlist" ]; then
+  echo "glue-report: no complete runs found under $data_dir/run" >&2
   echo "  run a benchmark first" >&2
   exit 1
-}
+fi
 
 host=$(hostname 2>/dev/null || echo unknown)
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -92,26 +116,13 @@ tmp="$output.tmp.$$"
 
   printf '  "runs": {\n'
   first_slug=1
-  for slug_dir in "$data_dir"/run/*; do
-    [ -d "$slug_dir" ] || continue
-    slug=$(basename "$slug_dir")
-
-    # Only whole runs: a run-NNN.json that is present but unparseable would
-    # corrupt the enclosing document, so check each one looks closed.
-    samples=""
-    for f in "$slug_dir"/run-*.json; do
-      [ -f "$f" ] || continue
-      case "$(tail -c 3 "$f" | tr -d ' \n')" in
-        *'}') samples="$samples $f" ;;
-        *) echo "glue-report: skipping truncated $f" >&2 ;;
-      esac
-    done
-    [ -n "$samples" ] || continue
-
+  # shellcheck disable=SC2013  # slugs cannot contain whitespace (see toSlug)
+  for slug in $(cut -f1 "$runlist" | sort -u); do
     [ "$first_slug" = 1 ] || printf ',\n'
     printf '    "%s": [\n' "$(esc "$slug")"
     first_sample=1
-    for f in $samples; do
+    # shellcheck disable=SC2013  # fields are tab-separated paths, read by cut
+    for f in $(awk -F'\t' -v s="$slug" '$1==s {print $2}' "$runlist" | sort); do
       [ "$first_sample" = 1 ] || printf ',\n'
       sed 's/^/      /' "$f"
       first_sample=0
@@ -126,12 +137,13 @@ tmp="$output.tmp.$$"
 mv "$tmp" "$output"
 
 size=$(wc -c < "$output" | tr -d ' ')
-runs=$(find "$data_dir/run" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+runs=$(cut -f1 "$runlist" | sort -u | wc -l | tr -d ' ')
+samples=$(wc -l < "$runlist" | tr -d ' ')
 
 cat <<EOF
 
 report written to $output
-  $runs configuration(s), $((size / 1024)) KiB
+  $runs configuration(s), $samples sample(s), $((size / 1024)) KiB
 
 Send this single file back to the Leios team. It contains the measurements, the
 machine they were taken on, and the exact db-analyser build that took them.

@@ -242,7 +242,7 @@ jobs:
               if /tmp/glue report -d /tmp/data > /tmp/rep 2>&1; then
                 echo "::error::report succeeded with no runs stored"; exit 1
               fi
-              grep -q "no runs found" /tmp/rep
+              grep -q "no complete runs found" /tmp/rep
 
               # The bundled helpers are present. That the launcher actually puts
               # them ahead of the host on PATH is only observable once beacon
