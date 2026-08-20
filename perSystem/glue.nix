@@ -120,12 +120,12 @@
         ANALYZER_COMPILER=${compilerTag}
         EOF
 
-        cp ${../scripts/glue-provision.sh}    $out/scripts/glue-provision.sh
-        cp ${../scripts/glue-benchmark.sh}    $out/scripts/glue-benchmark.sh
-        cp ${../scripts/glue-fetch-chain.sh}  $out/scripts/glue-fetch-chain.sh
-        cp ${../scripts/spo-sysinfo.sh}       $out/scripts/spo-sysinfo.sh
-        cp ${../scripts/glue-report.sh}       $out/scripts/glue-report.sh
-        cp ${../scripts/glue-run-all.sh}      $out/scripts/glue-run-all.sh
+        cp ${checkedScripts}/glue-provision.sh  $out/scripts/glue-provision.sh
+        cp ${checkedScripts}/glue-benchmark.sh  $out/scripts/glue-benchmark.sh
+        cp ${checkedScripts}/glue-fetch-chain.sh  $out/scripts/glue-fetch-chain.sh
+        cp ${checkedScripts}/spo-sysinfo.sh  $out/scripts/spo-sysinfo.sh
+        cp ${checkedScripts}/glue-report.sh  $out/scripts/glue-report.sh
+        cp ${checkedScripts}/glue-run-all.sh  $out/scripts/glue-run-all.sh
         chmod +x $out/scripts/*.sh
 
         cp ${../data/chains.tsv}     $out/share/chains.tsv
@@ -134,6 +134,28 @@
 
       meta.mainProgram = "beacon";
     };
+
+    # The scripts are shipped verbatim, so a syntax error in one of them would
+    # pass `nix build` and fail on an SPO's machine. Checking them here rather
+    # than only in CI means the payload cannot be built with a broken script in
+    # it -- and `-s sh` matters: these run under /bin/sh, which on Debian and
+    # Ubuntu is dash, not bash.
+    checkedScripts =
+      pkgs.runCommand "glue-scripts-checked" {
+        nativeBuildInputs = [pkgs.shellcheck];
+        # runCommand runs fixupPhase, which would rewrite #!/bin/sh to a store
+        # bash -- the exact breakage this payload was already fixed for once.
+        # The scripts must reach the target with the interpreter every Linux
+        # has.
+        dontPatchShebangs = true;
+      } ''
+        mkdir -p $out
+        for f in ${../scripts}/*.sh; do
+          echo "shellcheck $(basename "$f")"
+          shellcheck -s sh "$f"
+          install -m755 "$f" "$out/$(basename "$f")"
+        done
+      '';
 
     inherit (import ../nix/bundle.nix {inherit pkgs lib;}) mkRelocatable;
     inherit (import ../nix/selfextract.nix {inherit pkgs lib;}) mkSelfExtracting;
