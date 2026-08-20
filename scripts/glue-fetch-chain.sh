@@ -51,6 +51,28 @@ if [ -z "${GLUE_ROOT:-}" ]; then
   GLUE_ROOT=$(CDPATH='' cd -- "$self_dir/.." && pwd)
 fi
 
+# Resolve the bundled tools by path rather than by name. PATH ordering is set
+# by the launcher, but this script is also runnable directly out of the
+# extracted tree, and falling back to a host curl or unzip silently -- or
+# failing for want of one -- is worse than saying which is being used.
+CURL="$GLUE_ROOT/bin/curl"
+UNZIP="$GLUE_ROOT/bin/unzip"
+# The bundled curl looks for CA certificates at a nix store path that does not
+# exist on this machine, so it is told where they are rather than relying on the
+# launcher's environment surviving to here. Note the integrity guarantee does
+# not rest on TLS: the archive is checked against a sha256 from the table below.
+CA_BUNDLE="$GLUE_ROOT/share/ca-bundle.crt"
+for t in "$CURL" "$UNZIP"; do
+  [ -x "$t" ] || {
+    echo "glue-fetch-chain: $t is missing from the payload" >&2
+    exit 1
+  }
+done
+[ -r "$CA_BUNDLE" ] || {
+  echo "glue-fetch-chain: $CA_BUNDLE is missing from the payload" >&2
+  exit 1
+}
+
 table="$GLUE_ROOT/share/chains.tsv"
 baseurl_file="$GLUE_ROOT/share/chains.baseurl"
 [ -r "$table" ] || { echo "glue-fetch-chain: no fragment table at $table" >&2; exit 1; }
@@ -115,8 +137,9 @@ echo "fetching $chain ($((want_bytes / 1048576)) MiB) from $baseurl"
 # --continue-at resumes; --fail turns an HTTP error into a non-zero exit rather
 # than a saved error page; --location follows the redirect a release download
 # always involves.
-curl --fail --location --continue-at - \
+"$CURL" --fail --location --continue-at - \
      --retry 3 --retry-delay 5 \
+     --cacert "$CA_BUNDLE" \
      --output "$archive" \
      "$baseurl/$file"
 
@@ -162,7 +185,7 @@ echo "unpacking"
 staging="$dest.unpacking.$$"
 rm -rf "$staging"
 mkdir -p "$staging"
-unzip -q "$archive" -d "$staging"
+"$UNZIP" -q "$archive" -d "$staging"
 
 # An archive may or may not wrap its contents in a single top-level directory.
 # Normalise either way, and do not leave the staging directory behind.
