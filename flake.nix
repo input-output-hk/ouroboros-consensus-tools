@@ -50,7 +50,16 @@
         _module.args.pkgs = import inputs.nixpkgs {
           inherit system;
           inherit (inputs.haskellNix) config;
-          overlays = [inputs.haskellNix.overlay];
+          # The same overlay stack consensus itself applies. Needed because
+          # aarch64-linux has no db-analyser in consensus's flake outputs, so
+          # its project is instantiated from source there -- and its crypto
+          # dependencies resolve libblst, libsodium-vrf and secp256k1 through
+          # pkg-config, which only these overlays register with haskell.nix.
+          overlays = [
+            inputs.iohkNix.overlays.crypto
+            inputs.haskellNix.overlay
+            inputs.iohkNix.overlays.haskell-nix-crypto
+          ];
         };
       };
     };
