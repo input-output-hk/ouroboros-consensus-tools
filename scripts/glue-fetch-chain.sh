@@ -120,14 +120,26 @@ curl --fail --location --continue-at - \
      --output "$archive" \
      "$baseurl/$file"
 
-# A download that "succeeded" but produced markup is a rate-limit notice, a
-# captive portal, or a moved object. Saying so beats failing later at unzip.
-case "$(dd if="$archive" bs=1 count=15 2>/dev/null)" in
-  '<!DOCTYPE'*|'<html'*|'<HTML'*)
-    echo "glue-fetch-chain: $baseurl/$file returned a web page, not an archive." >&2
-    echo "  The link may have moved or be rate-limited." >&2
-    exit 1 ;;
-esac
+# A download that "succeeded" but produced something other than an archive is a
+# rate-limit notice, a captive portal, or a moved object. Saying so beats failing
+# later at unzip with a confusing message.
+#
+# The magic bytes are read as hex rather than raw: a zip begins PK\x03\x04 and
+# contains nulls, which a command substitution strips while warning
+# "ignored null byte in input" -- on every successful download.
+magic=$(od -An -tx1 -N4 "$archive" 2>/dev/null | tr -d ' \n')
+if [ "$magic" != "504b0304" ]; then
+  echo "glue-fetch-chain: $baseurl/$file is not a zip archive." >&2
+  # Nulls stripped before this reaches a substitution, for the same reason.
+  head -c 200 "$archive" 2>/dev/null | tr -d '\000' | head -3 | sed 's/^/  | /' >&2
+  case "$magic" in
+    3c21444f|3c68746d|3c48544d)
+      echo "  That is a web page: the link may have moved or be rate-limited." >&2 ;;
+    *)
+      echo "  Expected a zip (magic 504b0304), got $magic." >&2 ;;
+  esac
+  exit 1
+fi
 
 got_bytes=$(wc -c < "$archive" | tr -d ' ')
 if [ "$got_bytes" != "$want_bytes" ]; then

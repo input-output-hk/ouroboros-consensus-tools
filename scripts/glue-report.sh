@@ -63,7 +63,7 @@ if [ -d "$data_dir/run" ]; then
     [ -d "$slug_dir" ] || continue
     for f in "$slug_dir"/run-*.json; do
       [ -f "$f" ] || continue
-      case "$(tail -c 3 "$f" | tr -d ' \n')" in
+      case "$(tail -c 3 "$f" | tr -d ' \n\000')" in
         *'}') printf '%s\t%s\n' "$(basename "$slug_dir")" "$f" >> "$runlist" ;;
         *) echo "glue-report: skipping truncated $f" >&2 ;;
       esac
