@@ -157,6 +157,30 @@ jobs:
               echo "::error::$(basename "$f") has a rewritten shebang"; exit 1; }
           done
 
+      # Parse the hardware report with a real parser here, rather than only
+      # grepping it in the containers. It is assembled by hand in shell, so a
+      # field that is absent on one architecture and present on another can
+      # produce invalid JSON -- which is how `"physicalCores": ,` reached the
+      # aarch64 end-to-end job, /proc/cpuinfo having no "cpu cores" line on ARM.
+      # Catching it here costs seconds instead of a full benchmark.
+      - name: Hardware report is valid JSON
+        run: |
+          set -euo pipefail
+          /tmp/tree/scripts/spo-sysinfo.sh /tmp > /tmp/sysinfo.json
+          python3 -c "
+          import json, sys
+          d = json.load(open('/tmp/sysinfo.json'))
+          assert d['schemaVersion'] == 1
+          assert d['os']['architecture'], 'architecture missing'
+          print('valid JSON on', d['os']['architecture'])
+          print('  cpu   :', d['cpu']['model'])
+          print('  cores :', d['cpu']['logicalCpus'], 'logical,',
+                d['cpu']['physicalCores'], 'physical')
+          print('  disk  :', d['dataDir'].get('source'),
+                '->', [x.get('name') for x in d['dataDir'].get('physicalDevices', [])])
+          print('  unavailable:', len(d['unavailable']), 'field(s)')
+          "
+
       - name: Build the single-file artifact
         run: |
           set -euo pipefail

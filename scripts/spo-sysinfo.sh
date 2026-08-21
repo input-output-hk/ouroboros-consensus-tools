@@ -26,9 +26,25 @@ esc() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
                          -e 's/\t/\\t/g' -e 's/\r/\\r/g' | tr -d '\000-\010\013\014\016-\037'
 }
-kv()    { printf '    "%s": "%s",\n' "$1" "$(esc "$2")"; }
-kvnum() { printf '    "%s": %s,\n' "$1" "$2"; }
-kvbool() { printf '    "%s": %s,\n' "$1" "$2"; }
+kv() { printf '    "%s": "%s",\n' "$1" "$(esc "$2")"; }
+
+# Emits null rather than nothing when a value is absent or not a number. A bare
+# `"field": ,` is invalid JSON and would take the whole report with it -- which
+# is exactly what happened on aarch64, where /proc/cpuinfo has no "cpu cores"
+# line, so awk succeeded with empty output and `|| echo 0` never fired.
+kvnum() {
+  case "$2" in
+    "" | *[!0-9]*) printf '    "%s": null,\n' "$1" ;;
+    *)             printf '    "%s": %s,\n' "$1" "$2" ;;
+  esac
+}
+
+kvbool() {
+  case "$2" in
+    true | false) printf '    "%s": %s,\n' "$1" "$2" ;;
+    *)            printf '    "%s": null,\n' "$1" ;;
+  esac
+}
 
 UNAVAIL=""
 note_unavailable() { UNAVAIL="$UNAVAIL$1: $2\n"; }
