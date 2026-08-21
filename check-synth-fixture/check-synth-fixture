@@ -52,10 +52,22 @@ genesis names a pool whose keys nobody holds. These do not:
 - The three credential files carry the envelope types that `db-synthesizer`
   accepts.
 
-`check_analysis` counts the transactions. Every block must carry more than one,
-because `db-synthesizer` chains transactions until the next one no longer fits
-in the block. A block with one transaction means the fill loop stopped early. A
-block with none means the payment key never reached the forge loop.
+`check_analysis` counts the transactions and splits the blocks in two. A
+certifying block has an empty body, so its own column reads 0 and its
+endorser-block column holds the transactions it certifies. Every other block
+carries its own transactions and must carry more than one, because
+`db-synthesizer` chains them until the next one no longer fits. One transaction
+means the fill loop stopped early. None means the payment key never reached the
+forge loop.
+
+The chain must hold at least one certifying block. Without one, every check here
+holds on a chain that certifies nothing, and nothing is proven.
+
+`check_leios_analysis` runs the sibling checker in this repository over the
+produced chain. It compares `--count-tx-outputs` against `--show-block-txs-size`,
+which reach the endorser block by two different reads of the LeiosDb. It runs
+last, and it needs a node directory, so this script assembles one beside the
+ChainDB.
 
 `check_synthesis` also reads the two voting lines. The forger holds the pool's
 BLS signing key, so it must find its own seat on the committee, vote for every
@@ -67,8 +79,8 @@ without a key, or a key that matches no seat, produces no vote and no error.
 the other ChainDB files. `db-analyser` needs that file to start, and it reads the
 transactions of a certified endorser block from it.
 
-Every forging opportunity announces an endorser block, so the `ebs` table holds
-one row per block. Each row must report a complete closure, name at least one
+A block either certifies the endorser block its parent announced or announces one
+of its own, so the `ebs` table holds one row per announcing block. Each row must report a complete closure, name at least one
 transaction, and carry a body size under the message limit a peer enforces. Each
 `ebTxs` row must name a transaction that the `txs` table holds, because
 `db-analyser` reads the closure through that join and a broken one shows up as a
@@ -150,6 +162,13 @@ MIN_PAYMENT_BALANCE = 100_000_000_000_000
 # The fixture that ships next to this script. It is small enough to keep in the
 # repository, so a checkout can run this script with no arguments.
 DEFAULT_FIXTURE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixture")
+
+# The sibling checker, in the repository next to this one.
+CHECK_LEIOS_ANALYSIS = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "check-leios-analysis",
+    "check-leios-analysis",
+)
 
 HEX_RE = re.compile(r"\A[0-9a-f]+\Z")
 FORGER_COUNT_RE = re.compile(r"^--> forger count: (\d+)$", re.M)
@@ -547,13 +566,6 @@ def check_synthesis(db_synthesizer, paths, db_dir, blocks, work_dir):
     m = VOTES_RE.search(out)
     voted = int(m.group(1)) if m else 0
     certified = int(m.group(2)) if m else 0
-    results.append(
-        check(
-            "db-synthesizer votes for every endorser block it announces",
-            voted == forged,
-            f"{voted} votes, {forged} announcements",
-        )
-    )
 
     # The fixture registers one pool and gives it every lovelace of stake, so its
     # single vote carries the whole weight and crosses the threshold on its own.
@@ -565,10 +577,10 @@ def check_synthesis(db_synthesizer, paths, db_dir, blocks, work_dir):
         )
     )
 
-    return results.count(False), forged
+    return results.count(False), forged, voted
 
 
-def check_leios_db(db_dir, forged):
+def check_leios_db(db_dir, announced, voted):
     """Read the LeiosDb that db-synthesizer wrote. Returns the failure count."""
     results = []
     path = os.path.join(db_dir, "leios.db")
@@ -604,11 +616,22 @@ def check_leios_db(db_dir, forged):
             t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in LEIOS_DB_TABLES
         }
 
+        # A block either certifies its parent's endorser block or announces one
+        # of its own. `check_analysis` counts the second kind by reading which
+        # blocks carry their own transactions.
         results.append(
             check(
-                "every forged block announces an endorser block",
-                counts["ebs"] == forged,
-                f"{counts['ebs']} announcements, {forged} blocks",
+                "every block that does not certify announces an endorser block",
+                counts["ebs"] == announced,
+                f"{counts['ebs']} announcements, {announced} such blocks",
+            )
+        )
+
+        results.append(
+            check(
+                "the forger votes once for every endorser block it announces",
+                voted == counts["ebs"],
+                f"{voted} votes, {counts['ebs']} announcements",
             )
         )
         # Every check below reads the announced rows. With no rows they all pass
@@ -766,8 +789,16 @@ def check_analysis(db_analyser, paths, db_dir, forged, work_dir):
     )
     rows = EB_COUNT_RE.findall(out)
     tx_counts = [int(r[1]) for r in rows]
+    eb_counts = [int(r[2]) for r in rows]
     tx_total = sum(tx_counts)
-    eb_total = sum(int(r[2]) for r in rows)
+    eb_total = sum(eb_counts)
+
+    # A certifying block has an empty body, and the transactions it puts on the
+    # chain are those of the endorser block it certifies. So its own column
+    # reads 0 and its endorser-block column does not. Every other block carries
+    # its own transactions and certifies nothing.
+    certifying = [(t, e) for t, e in zip(tx_counts, eb_counts) if t == 0]
+    announcing = [t for t, e in zip(tx_counts, eb_counts) if t > 0]
 
     results.append(
         check(
@@ -777,11 +808,29 @@ def check_analysis(db_analyser, paths, db_dir, forged, work_dir):
         )
     )
 
+    # Without a certifying block every check below holds on a chain where
+    # nothing certifies, and nothing here is proven.
     results.append(
         check(
-            "every block carries transactions",
-            bool(tx_counts) and min(tx_counts) > 0,
-            f"{tx_total} transaction outputs, smallest block has {min(tx_counts) if tx_counts else 0}",
+            "the chain holds a certifying block",
+            bool(certifying),
+            f"{len(certifying)} certifying, {len(announcing)} carrying their own",
+        )
+    )
+
+    results.append(
+        check(
+            "every certifying block reports the transactions it certifies",
+            bool(certifying) and all(e > 0 for _t, e in certifying),
+            f"{eb_total} endorser-block transaction outputs over {len(certifying)} blocks",
+        )
+    )
+
+    results.append(
+        check(
+            "every block that does not certify carries transactions",
+            bool(announcing) and min(announcing) > 0,
+            f"{tx_total} transaction outputs, smallest such block has {min(announcing) if announcing else 0}",
         )
     )
 
@@ -790,18 +839,13 @@ def check_analysis(db_analyser, paths, db_dir, forged, work_dir):
     # block would mean the fill loop stopped after its first transaction.
     results.append(
         check(
-            "blocks are filled, not carrying a single transaction",
-            bool(tx_counts) and min(tx_counts) > 1,
-            f"smallest block has {min(tx_counts) if tx_counts else 0}, largest has {max(tx_counts) if tx_counts else 0}",
+            "those blocks are filled, not carrying a single transaction",
+            bool(announcing) and min(announcing) > 1,
+            f"smallest such block has {min(announcing) if announcing else 0}, largest has {max(announcing) if announcing else 0}",
         )
     )
 
-    # The EB columns are reported, not asserted. `db-synthesizer` announces no
-    # endorser block yet, so they read 0. When the forge loop announces one,
-    # this note starts to move and becomes a check.
-    print(f"note  count-tx-outputs: {eb_total} EB transaction outputs")
-
-    return results.count(False)
+    return results.count(False), len(announcing)
 
 
 def check_era(db_dir):
@@ -860,6 +904,45 @@ def check_era(db_dir):
     return results.count(False)
 
 
+def check_leios_analysis(script, db_analyser, paths, db_dir, work_dir):
+    """Run the sibling checker over the produced chain. Returns the failure count."""
+    if not os.path.isfile(script):
+        print(f"note  no check-leios-analysis at {script}, so the analyses are not cross-checked")
+        return 0
+
+    # It takes a node directory holding `config.json` beside `db/`. The work
+    # directory holds only `db/`, and the fixture must stay unwritten, so the
+    # config is copied in.
+    node_dir = os.path.join(work_dir, "node")
+    os.makedirs(node_dir, exist_ok=True)
+    shutil.copy(paths["config"], os.path.join(node_dir, "config.json"))
+    for name in os.listdir(paths["dir"]):
+        if name.endswith("-genesis.json"):
+            shutil.copy(os.path.join(paths["dir"], name), os.path.join(node_dir, name))
+    link = os.path.join(node_dir, "db")
+    if not os.path.exists(link):
+        os.symlink(db_dir, link)
+
+    print()
+    out = subprocess.run(
+        [sys.executable, script, node_dir, "--db-analyser", db_analyser],
+        capture_output=True,
+        text=True,
+    )
+    log_path = os.path.join(work_dir, "check-leios-analysis.log")
+    with open(log_path, "w") as f:
+        f.write(out.stdout + out.stderr)
+    for line in out.stdout.splitlines():
+        if line.startswith(("ok", "FAIL", "note")):
+            print(f"  {line}")
+    ok = check(
+        "check-leios-analysis agrees with the produced chain",
+        out.returncode == 0,
+        "" if out.returncode == 0 else f"exited {out.returncode}, see {log_path}",
+    )
+    return 0 if ok else 1
+
+
 def tail(text, n):
     return "\n".join(text.splitlines()[-n:])
 
@@ -914,16 +997,22 @@ def main():
         print("note  no cardano-cli found, so the genesis is not compared against the credentials")
 
     print()
-    synth_failures, forged = check_synthesis(db_synthesizer, paths, db_dir, args.blocks, work_dir)
+    synth_failures, forged, voted = check_synthesis(
+        db_synthesizer, paths, db_dir, args.blocks, work_dir
+    )
     failures += synth_failures
     if forged == 0:
         print(f"\n{failures} checks failed. No chain to analyse, so the rest did not run.")
         sys.exit(1)
 
-    failures += check_leios_db(db_dir, forged)
     failures += check_immutalisation(db_immutaliser, paths, db_dir, work_dir)
-    failures += check_analysis(db_analyser, paths, db_dir, forged, work_dir)
+    # `check_leios_db` runs after the analysis, because the analysis is what
+    # tells it how many blocks announced rather than certified.
+    analysis_failures, announced = check_analysis(db_analyser, paths, db_dir, forged, work_dir)
+    failures += analysis_failures
+    failures += check_leios_db(db_dir, announced, voted)
     failures += check_era(db_dir)
+    failures += check_leios_analysis(CHECK_LEIOS_ANALYSIS, db_analyser, paths, db_dir, work_dir)
 
     print()
     if failures:
