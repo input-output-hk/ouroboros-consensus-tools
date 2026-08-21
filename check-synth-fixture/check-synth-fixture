@@ -57,6 +57,12 @@ because `db-synthesizer` chains transactions until the next one no longer fits
 in the block. A block with one transaction means the fill loop stopped early. A
 block with none means the payment key never reached the forge loop.
 
+`check_synthesis` also reads the two voting lines. The forger holds the pool's
+BLS signing key, so it must find its own seat on the committee, vote for every
+endorser block it announces, and see each vote certified. The pool holds all the
+stake on this fixture, so one vote crosses the certification threshold. A seat
+without a key, or a key that matches no seat, produces no vote and no error.
+
 `check_leios_db` opens the SQLite LeiosDb that `db-synthesizer` writes next to
 the other ChainDB files. `db-analyser` needs that file to start, and it reads the
 transactions of a certified endorser block from it.
@@ -151,6 +157,8 @@ FORGED_RE = re.compile(r"^--> forged and adopted (\d+) blocks; reached SlotNo (\
 CANDIDATES_RE = re.compile(r"^Number of candidates: (\d+)$", re.M)
 IMMUTALISED_RE = re.compile(r"^Copied to ImmutableDB, new tip is (.*)$", re.M)
 COUNTED_RE = re.compile(r"Counted (\d+) blocks\.", re.M)
+COMMITTEE_RE = re.compile(r"^--> committee: (.*)$", re.M)
+VOTES_RE = re.compile(r"^--> votes: (\d+) cast, (\d+) certified$", re.M)
 EB_COUNT_RE = re.compile(r"^\[[^]]*\] BlockNo \d+\s+SlotNo \d+\s+cumulative: (\d+)\s+count: (\d+)\s+EB count: (\d+)$", re.M)
 
 
@@ -496,6 +504,8 @@ def check_synthesis(db_synthesizer, paths, db_dir, blocks, work_dir):
             os.path.join(keys, "kes.skey"),
             "--payment-signing-key",
             os.path.join(keys, "payment.skey"),
+            "--shelley-bls-key",
+            os.path.join(keys, "bls.skey"),
             "-b",
             str(blocks),
             "-f",
@@ -521,6 +531,37 @@ def check_synthesis(db_synthesizer, paths, db_dir, blocks, work_dir):
             "db-synthesizer forges and adopts every requested block",
             forged == blocks,
             f"forged {forged} of {blocks}, reached slot {reached}",
+        )
+    )
+
+    m = COMMITTEE_RE.search(out)
+    seating = m.group(1) if m else ""
+    results.append(
+        check(
+            "the forger's BLS key holds a committee seat",
+            bool(m) and "our seat: none" not in seating,
+            seating or "no committee line",
+        )
+    )
+
+    m = VOTES_RE.search(out)
+    voted = int(m.group(1)) if m else 0
+    certified = int(m.group(2)) if m else 0
+    results.append(
+        check(
+            "db-synthesizer votes for every endorser block it announces",
+            voted == forged,
+            f"{voted} votes, {forged} announcements",
+        )
+    )
+
+    # The fixture registers one pool and gives it every lovelace of stake, so its
+    # single vote carries the whole weight and crosses the threshold on its own.
+    results.append(
+        check(
+            "every vote certifies its endorser block",
+            voted > 0 and certified == voted,
+            f"{certified} certified of {voted} votes",
         )
     )
 
