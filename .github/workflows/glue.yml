@@ -344,16 +344,26 @@ jobs:
   # the only thing that proves the bundled jq and GNU time are the ones beacon
   # picks up, since that is only observable once capabilities are probed.
   end-to-end:
-    name: Full benchmark (downloads a chain)
-    runs-on: ubuntu-latest
+    name: Full benchmark, ${{ matrix.system }}
+    runs-on: ${{ matrix.runner }}
     needs: build
     if: github.event_name == 'workflow_dispatch'
     timeout-minutes: 120
 
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,    system: x86_64-linux }
+          # The aarch64 artifact is built from a from-source consensus rather
+          # than a cached one, so it is a genuinely different binary -- running
+          # a real benchmark on it is not implied by the x86_64 result.
+          - { runner: ubuntu-24.04-arm, system: aarch64-linux }
+
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: glue-x86_64-linux
+          name: glue-${{ matrix.system }}
           path: /tmp/artifact
 
       - name: Free disk space
@@ -406,7 +416,12 @@ jobs:
               for s in samples:
                   assert s['data'], f'{slug} sample has no datapoints'
           dev = d['system']['dataDir'].get('physicalDevices', [])
+          arch = d['system']['os'].get('architecture')
+          expected = '${{ matrix.system }}'.split('-')[0]
+          # x86_64-linux -> x86_64, aarch64-linux -> aarch64
+          assert arch == expected, f'report says {arch}, expected {expected}'
           print('report OK:', {k: len(v) for k, v in runs.items()})
+          print('  arch    :', arch)
           print('  analyzer:', d['analyzer']['ciCommitSHA1'][:12])
           print('  disk    :', d['system']['dataDir'].get('source'),
                 '->', [x.get('name') for x in dev])
