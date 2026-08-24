@@ -110,18 +110,29 @@ done < "$runlist"
 #    sending this rather than whatever was recorded earlier.
 "$SYSINFO" "$data_dir" > "$staging/$name/sysinfo.json"
 
-# 3. What produced the measurements. Small enough to write by hand, and the
-#    only file here that is not either beacon's output or the sysinfo script's.
+# 3. Only what the run files cannot say for themselves.
+#
+#    beacon already records the analyzer commit and date, the host, the run
+#    date, the chain, the backend, the apply mode and the consensus/ledger/plutus
+#    manifest in every run file's `meta`, and the compiler appears in the run
+#    directory name. Repeating any of that here would create a second copy that
+#    can disagree with the first, so this file carries three things and no more:
+#
+#    reportVersion       how to read this archive; no run file can say that
+#    assertionsDisabled  that db-analyser came from exesNoAsserts. beacon cannot
+#                        know this -- it is a property of how the payload was
+#                        built -- and it decides whether the numbers mean
+#                        anything, since assertions sit on the measured path
+#    analyzer.pinnedTo   what this *build* was pinned to, as opposed to what each
+#                        run reports having used. If the two ever disagree the
+#                        archive is self-inconsistent, and that is worth being
+#                        able to see rather than having to trust
 cat > "$staging/$name/provenance.json" <<EOF
 {
   "reportVersion": 2,
-  "generatedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "host": "$host",
   "analyzer": {
     "name": "db-analyser",
-    "ciCommitSHA1": "$ANALYZER_SHA",
-    "ciCommitDate": "$ANALYZER_DATE",
-    "compiler": "$ANALYZER_COMPILER",
+    "pinnedTo": "$ANALYZER_SHA",
     "assertionsDisabled": true
   }
 }

@@ -443,7 +443,10 @@ jobs:
           prov = json.load(open(os.path.join(root, 'provenance.json')))
           sysinfo = json.load(open(os.path.join(root, 'sysinfo.json')))
           assert prov['reportVersion'] == 2
-          assert prov['analyzer']['ciCommitSHA1'], 'analyzer identity missing'
+          assert prov['analyzer']['assertionsDisabled'] is True, \
+              'a benchmark built with assertions on is not a valid measurement'
+          pinned = prov['analyzer']['pinnedTo']
+          assert pinned, 'analyzer pin missing'
           assert sysinfo['schemaVersion'] == 1
 
           arch = sysinfo['os'].get('architecture')
@@ -457,6 +460,12 @@ jobs:
               for f in files:
                   d = json.load(open(f))
                   assert d['data'], f'{f} has no datapoints'
+                  # provenance says what the build was pinned to; each run says
+                  # what it used. Disagreement means the archive describes a
+                  # measurement it did not take.
+                  used = d['meta']['commit']['ciCommitSHA1']
+                  assert pinned.startswith(used) or used.startswith(pinned), \
+                      f'{f} used {used}, build pinned to {pinned}'
               runs[slug] = len(files)
           assert runs, 'no runs in the report'
 
@@ -472,7 +481,7 @@ jobs:
           dev = sysinfo['dataDir'].get('physicalDevices', [])
           print('report OK:', runs)
           print('  arch    :', arch, '(run files byte-identical to beacon output)')
-          print('  analyzer:', prov['analyzer']['ciCommitSHA1'][:12])
+          print('  analyzer:', pinned[:12], '(matches every run file)')
           print('  disk    :', sysinfo['dataDir'].get('source'),
                 '->', [x.get('name') for x in dev])
           for x in dev:

@@ -125,8 +125,18 @@ directory. **That single file is what to send back.** It contains:
 glue-report-<host>-<utc>/
   runs/<configuration>/run-NNN.json   exactly as beacon wrote them
   sysinfo.json                        the machine they were measured on
-  provenance.json                     the db-analyser build that measured them
+  provenance.json                     what the run files cannot say themselves
 ```
+
+`provenance.json` is deliberately small. beacon already records the analyzer
+commit and date, the host, the chain, the backend, the apply mode and the
+consensus/ledger/plutus manifest in every run file, and the compiler appears in
+the run directory name — duplicating any of that would create a second copy
+that can disagree with the first. What it adds is the archive's format version,
+the fact that `db-analyser` was built with assertions off (beacon cannot know
+this, and it decides whether the numbers mean anything, since assertions sit on
+the measured path), and what this *build* was pinned to — which CI checks
+against what each run reports having used.
 
 Three separate files rather than one merged document, for two reasons. The run
 files arrive as the bytes beacon wrote, so they can be fed straight back into
