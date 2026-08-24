@@ -136,6 +136,13 @@
         install -m755 ${pkgs.curl}/bin/curl         $out/bin/curl
         install -m755 ${pkgs.unzip}/bin/unzip       $out/bin/unzip
 
+        # `zip` for assembling the report. The host is already required to have
+        # tar and gzip, so a .tar.gz would have cost nothing -- but a zip is what
+        # the person on the other end can open without thinking about it, and at
+        # ~200 KiB the bundled copy also means the archive does not depend on
+        # whatever tar the host happens to ship.
+        install -m755 ${pkgs.zip}/bin/zip           $out/bin/zip
+
         # nixpkgs curl looks for CA certificates at a store path that will not
         # exist on the target, so HTTPS would fail. The risk this pins is
         # bounded: every fragment is checked against a sha256 baked into the

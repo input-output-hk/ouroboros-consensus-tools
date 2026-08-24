@@ -50,8 +50,9 @@ turned out not to be:
 - **`jq`.** Not in base on Debian, Ubuntu or RHEL, and beacon reshapes
   db-analyser's output through it. Bundled, and the launcher puts the bundled
   copy ahead of any host one on `PATH`.
-- **`curl` and `unzip`.** curl is absent from Debian netinst and minimal
-  container images; unzip is a separate package everywhere. Both bundled, along
+- **`curl`, `unzip` and `zip`.** curl is absent from Debian netinst and minimal
+  container images; unzip and zip are separate packages everywhere. zip
+  assembles the report. Both bundled, along
   with a CA bundle — nixpkgs curl looks for certificates at a store path that
   does not exist on the target. Note the integrity guarantee does not rest on
   TLS: every fragment is checked against a sha256 baked into the release.
@@ -117,11 +118,28 @@ compiled into `beacon`.
 GitHub API: the pinned db-analyser, its build plan, and its resolved commit.
 Nothing reaches the network, and beacon itself is unmodified.
 
-`benchmark` finishes by writing `glue-report-<host>-<utc>.json` into the data
-directory. **That single file is what to send back.** It carries the
-measurements, the machine they were taken on, and the exact db-analyser build
-that took them — the on-disk figures cannot be interpreted without the hardware
-alongside them, so the two travel together.
+`benchmark` finishes by writing `glue-report-<host>-<utc>.zip` into the data
+directory. **That single file is what to send back.** It contains:
+
+```
+glue-report-<host>-<utc>/
+  runs/<configuration>/run-NNN.json   exactly as beacon wrote them
+  sysinfo.json                        the machine they were measured on
+  provenance.json                     the db-analyser build that measured them
+```
+
+Three separate files rather than one merged document, for two reasons. The run
+files arrive as the bytes beacon wrote, so they can be fed straight back into
+`beacon summary` or `beacon compare` without being un-transformed first. And
+nothing here can invalidate anything else: an earlier version spliced all of it
+into one hand-assembled JSON document, where a single empty field — a numeric
+one that exists on x86_64 and not on ARM — invalidated the whole report,
+measurements included.
+
+The hardware travels with the measurements because the on-disk figures cannot be
+read without it. The page-cache-bypassing configuration measures the disk on
+purpose, so rotational versus NVMe and write-through versus write-back change
+what the numbers mean.
 
 The db-analyser revision is fixed at build time, so `benchmark` supplies
 `--rev` itself; it is not the operator's concern.

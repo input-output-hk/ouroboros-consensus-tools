@@ -1,22 +1,22 @@
 #!/bin/sh
-# Collect everything the Leios team needs into one file.
+# Collect everything the Leios team needs into one file to send back.
 #
-# ouroboros-leios#1048 asks that it be easy to send reports back. The easiest
-# artifact is a single file, so this gathers three things that are otherwise
-# separate outputs:
+# The archive holds three kinds of thing, kept separate rather than merged:
 #
-#   what was measured    every stored run, with its per-slot datapoints, exactly
-#                        as beacon wrote it
-#   what measured it     the pinned db-analyser commit, its compiler, and the
-#                        build plan behind it
-#   where it ran         the hardware report -- without which the on-disk
-#                        figures cannot be interpreted at all, since the
-#                        headline configuration bypasses the page cache
-#                        specifically to measure the disk
+#   runs/<slug>/run-NNN.json   beacon's own run files, byte for byte
+#   sysinfo.json               the hardware report, standalone
+#   provenance.json            what produced the measurements
 #
-# No parsing is involved: beacon's run files and the hardware report are already
-# JSON, and embedding JSON inside JSON is concatenation. That is why this needs
-# no jq even though its output is a JSON document.
+# Copied verbatim, deliberately. An earlier version spliced all of this into one
+# hand-assembled JSON document, which meant every field of the hardware report
+# was load-bearing for the whole file: a numeric field that was empty on one
+# architecture -- /proc/cpuinfo has no "cpu cores" line on ARM -- produced
+# `"physicalCores": ,` and invalidated the entire report, measurements included.
+# Separate files cannot do that to each other.
+#
+# It also means the run files arriving at the other end are the same bytes
+# beacon wrote, so they can be fed straight back into `beacon summary` or
+# `beacon compare` without anything having to un-transform them first.
 set -eu
 
 usage() {
@@ -24,7 +24,7 @@ usage() {
 Usage: glue-report.sh [-d DATA_DIR] [-o OUTPUT]
 
   -d DATA_DIR  beacon data directory (default: ./glue-data, or $GLUE_DATA)
-  -o OUTPUT    file to write (default: glue-report-<host>-<utc>.json in DATA_DIR)
+  -o OUTPUT    archive to write (default: glue-report-<host>-<utc>.zip in DATA_DIR)
   -h, --help   this text
 EOF
 }
@@ -37,7 +37,7 @@ while [ $# -gt 0 ]; do
     -d) data_dir=$2; shift 2 ;;
     -o) output=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
-    *) echo "unexpected argument: $1" >&2; usage; exit 1 ;;
+    *) echo "glue-report: unexpected argument: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
 
@@ -47,104 +47,103 @@ if [ -z "${GLUE_ROOT:-}" ]; then
 fi
 export GLUE_ROOT
 
-# Collect the whole run files first, and refuse if there are none. The
-# directory existing proves nothing -- provisioning creates it -- and an empty
-# report would look like a result rather than an error.
-#
-# A run-NNN.json that is present but unparseable would corrupt the enclosing
-# document, since this assembles by concatenation, so each is checked for a
-# closing brace here rather than mid-write.
+# Resolved by path, not by name: this script is runnable directly out of the
+# extracted tree, where the launcher never set PATH.
+ZIP="$GLUE_ROOT/bin/zip"
+SYSINFO="$GLUE_ROOT/scripts/spo-sysinfo.sh"
+for t in "$ZIP" "$SYSINFO"; do
+  [ -x "$t" ] || { echo "glue-report: $t is missing from the payload" >&2; exit 1; }
+done
+
+# shellcheck disable=SC1091  # generated at build time
+. "$GLUE_ROOT/share/pin.env"
+
+# Find the run files first and refuse if there are none. The directory existing
+# proves nothing -- provisioning creates it -- and an empty archive would look
+# like a result.
 runlist="${TMPDIR:-/tmp}/glue-report-runs.$$"
 : > "$runlist"
-trap 'rm -f "$runlist"' EXIT INT TERM
 
 if [ -d "$data_dir/run" ]; then
   for slug_dir in "$data_dir"/run/*; do
     [ -d "$slug_dir" ] || continue
     for f in "$slug_dir"/run-*.json; do
       [ -f "$f" ] || continue
-      case "$(tail -c 3 "$f" | tr -d ' \n\000')" in
-        *'}') printf '%s\t%s\n' "$(basename "$slug_dir")" "$f" >> "$runlist" ;;
-        *) echo "glue-report: skipping truncated $f" >&2 ;;
-      esac
+      printf '%s\t%s\n' "$(basename "$slug_dir")" "$f" >> "$runlist"
     done
   done
 fi
 
 if [ ! -s "$runlist" ]; then
-  echo "glue-report: no complete runs found under $data_dir/run" >&2
+  rm -f "$runlist"
+  echo "glue-report: no runs found under $data_dir/run" >&2
   echo "  run a benchmark first" >&2
   exit 1
 fi
 
 host=$(hostname 2>/dev/null || echo unknown)
+safe_host=$(printf '%s' "$host" | tr -c 'A-Za-z0-9._-' '-')
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
+name="glue-report-$safe_host-$stamp"
 
-if [ -z "$output" ]; then
-  safe_host=$(printf '%s' "$host" | tr -c 'A-Za-z0-9._-' '-')
-  output="$data_dir/glue-report-$safe_host-$stamp.json"
-fi
+[ -n "$output" ] || output="$data_dir/$name.zip"
 
-# shellcheck disable=SC1091  # generated at build time
-. "$GLUE_ROOT/share/pin.env"
+# Absolute, because the archive is built from inside the staging directory.
+case "$output" in
+  /*) ;;
+  *) output="$(CDPATH='' cd -- "$(dirname "$output")" && pwd)/$(basename "$output")" ;;
+esac
 
-esc() {
-  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
-}
+staging="${TMPDIR:-/tmp}/$name.$$"
+trap 'rm -rf "$staging" "$runlist"' EXIT INT TERM
+mkdir -p "$staging/$name/runs"
 
-tmp="$output.tmp.$$"
+# 1. The run files, unmodified.
+samples=0
+while IFS='	' read -r slug path; do
+  mkdir -p "$staging/$name/runs/$slug"
+  cp "$path" "$staging/$name/runs/$slug/$(basename "$path")"
+  samples=$((samples + 1))
+done < "$runlist"
 
+# 2. The hardware report, regenerated so it describes the machine that is
+#    sending this rather than whatever was recorded earlier.
+"$SYSINFO" "$data_dir" > "$staging/$name/sysinfo.json"
+
+# 3. What produced the measurements. Small enough to write by hand, and the
+#    only file here that is not either beacon's output or the sysinfo script's.
+cat > "$staging/$name/provenance.json" <<EOF
 {
-  printf '{\n'
-  printf '  "reportVersion": 1,\n'
-  printf '  "generatedAt": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf '  "host": "%s",\n' "$(esc "$host")"
+  "reportVersion": 2,
+  "generatedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "host": "$host",
+  "analyzer": {
+    "name": "db-analyser",
+    "ciCommitSHA1": "$ANALYZER_SHA",
+    "ciCommitDate": "$ANALYZER_DATE",
+    "compiler": "$ANALYZER_COMPILER",
+    "assertionsDisabled": true
+  }
+}
+EOF
 
-  printf '  "analyzer": {\n'
-  printf '    "name": "db-analyser",\n'
-  printf '    "ciCommitSHA1": "%s",\n' "$(esc "$ANALYZER_SHA")"
-  printf '    "ciCommitDate": "%s",\n' "$(esc "$ANALYZER_DATE")"
-  printf '    "compiler": "%s",\n' "$(esc "$ANALYZER_COMPILER")"
-  printf '    "assertionsDisabled": true\n'
-  printf '  },\n'
+# 4. One file. -X drops uid/gid and extra attributes so the same inputs give the
+#    same archive; -r because the run files sit in per-configuration directories.
+rm -f "$output"
+(cd "$staging" && "$ZIP" -q -X -r "$output" "$name")
 
-  # The hardware report is regenerated rather than read from a file, so it
-  # always describes the machine that is sending the report.
-  printf '  "system":\n'
-  "$GLUE_ROOT/scripts/spo-sysinfo.sh" "$data_dir" | sed 's/^/    /'
-  printf '  ,\n'
-
-  printf '  "runs": {\n'
-  first_slug=1
-  # shellcheck disable=SC2013  # slugs cannot contain whitespace (see toSlug)
-  for slug in $(cut -f1 "$runlist" | sort -u); do
-    [ "$first_slug" = 1 ] || printf ',\n'
-    printf '    "%s": [\n' "$(esc "$slug")"
-    first_sample=1
-    # shellcheck disable=SC2013  # fields are tab-separated paths, read by cut
-    for f in $(awk -F'\t' -v s="$slug" '$1==s {print $2}' "$runlist" | sort); do
-      [ "$first_sample" = 1 ] || printf ',\n'
-      sed 's/^/      /' "$f"
-      first_sample=0
-    done
-    printf '\n    ]'
-    first_slug=0
-  done
-  printf '\n  }\n'
-  printf '}\n'
-} > "$tmp"
-
-mv "$tmp" "$output"
-
+slugs=$(cut -f1 "$runlist" | sort -u | wc -l | tr -d ' ')
 size=$(wc -c < "$output" | tr -d ' ')
-runs=$(cut -f1 "$runlist" | sort -u | wc -l | tr -d ' ')
-samples=$(wc -l < "$runlist" | tr -d ' ')
 
 cat <<EOF
 
 report written to $output
-  $runs configuration(s), $samples sample(s), $((size / 1024)) KiB
+  $slugs configuration(s), $samples run file(s), $((size / 1024)) KiB
 
-Send this single file back to the Leios team. It contains the measurements, the
-machine they were taken on, and the exact db-analyser build that took them.
+  $name/
+    runs/<configuration>/run-NNN.json   as beacon wrote them
+    sysinfo.json                        the machine they were measured on
+    provenance.json                     the db-analyser build that measured them
+
+Send this single file back to the Leios team.
 EOF

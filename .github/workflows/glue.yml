@@ -294,7 +294,7 @@ jobs:
               if /tmp/glue report -d /tmp/data > /tmp/rep 2>&1; then
                 echo "::error::report succeeded with no runs stored"; exit 1
               fi
-              grep -q "no complete runs found" /tmp/rep
+              grep -q "no runs found" /tmp/rep
 
               # A bare invocation must do the whole job rather than fall
               # through to the developer usage of beacon -- but it must refuse
@@ -420,34 +420,60 @@ jobs:
           echo "--- stored runs ---"
           ls /tmp/data/run
 
-          # The report is the artifact an SPO sends back, so assert it is whole:
-          # valid JSON, carrying the measurements, the analyzer identity and the
-          # hardware together. Written by concatenation, so a malformed run file
-          # would corrupt the document -- python is used here only as a parser,
-          # and is not required on an SPO's machine.
-          report=$(find /tmp/data -maxdepth 1 -name 'glue-report-*.json' | head -1)
-          test -n "$report"
-          python3 - "$report" <<'PY'
-          import json, sys
-          d = json.load(open(sys.argv[1]))
-          assert d['reportVersion'] == 1
-          assert d['analyzer']['ciCommitSHA1'], 'analyzer identity missing'
-          assert d['system']['schemaVersion'] == 1
-          runs = d['runs']
-          assert runs, 'no runs in the report'
-          for slug, samples in runs.items():
-              assert samples, f'{slug} has no samples'
-              for s in samples:
-                  assert s['data'], f'{slug} sample has no datapoints'
-          dev = d['system']['dataDir'].get('physicalDevices', [])
-          arch = d['system']['os'].get('architecture')
+          # The report is the artifact an SPO sends back, so assert it is
+          # whole: the run files present and unmodified, the hardware report and
+          # provenance parseable on their own. python and unzip are used here
+          # only as checkers; neither is required on an SPO's machine.
+          archive=$(find /tmp/data -maxdepth 1 -name 'glue-report-*.zip' | head -1)
+          test -n "$archive"
+          rm -rf /tmp/check && mkdir /tmp/check
+          # The bundled unzip, resolved to a path rather than left as a glob.
+          unzip_bin=$(find /tmp/glue-home -maxdepth 3 -path '*/bin/unzip' | head -1)
+          test -x "$unzip_bin"
+          "$unzip_bin" -q "$archive" -d /tmp/check
+          find /tmp/check -type f | sed 's|/tmp/check/||' | sort
+
+          python3 - /tmp/check <<'PY'
+          import json, os, sys, glob, hashlib
+
+          root = glob.glob(os.path.join(sys.argv[1], 'glue-report-*'))[0]
+
+          # Each file must parse on its own. That is the point of the layout:
+          # one bad file cannot invalidate the others.
+          prov = json.load(open(os.path.join(root, 'provenance.json')))
+          sysinfo = json.load(open(os.path.join(root, 'sysinfo.json')))
+          assert prov['reportVersion'] == 2
+          assert prov['analyzer']['ciCommitSHA1'], 'analyzer identity missing'
+          assert sysinfo['schemaVersion'] == 1
+
+          arch = sysinfo['os'].get('architecture')
           expected = '${{ matrix.system }}'.split('-')[0]
-          # x86_64-linux -> x86_64, aarch64-linux -> aarch64
           assert arch == expected, f'report says {arch}, expected {expected}'
-          print('report OK:', {k: len(v) for k, v in runs.items()})
-          print('  arch    :', arch)
-          print('  analyzer:', d['analyzer']['ciCommitSHA1'][:12])
-          print('  disk    :', d['system']['dataDir'].get('source'),
+
+          runs = {}
+          for slug in sorted(os.listdir(os.path.join(root, 'runs'))):
+              files = sorted(glob.glob(os.path.join(root, 'runs', slug, 'run-*.json')))
+              assert files, f'{slug} has no run files'
+              for f in files:
+                  d = json.load(open(f))
+                  assert d['data'], f'{f} has no datapoints'
+              runs[slug] = len(files)
+          assert runs, 'no runs in the report'
+
+          # The run files must be the bytes beacon wrote, not a re-serialisation:
+          # the receiving end feeds them straight back into beacon.
+          for slug in runs:
+              for f in glob.glob(os.path.join(root, 'runs', slug, 'run-*.json')):
+                  orig = os.path.join('/tmp/data/run', slug, os.path.basename(f))
+                  a = hashlib.sha256(open(orig, 'rb').read()).hexdigest()
+                  b = hashlib.sha256(open(f, 'rb').read()).hexdigest()
+                  assert a == b, f'{os.path.basename(f)} was modified in the report'
+
+          dev = sysinfo['dataDir'].get('physicalDevices', [])
+          print('report OK:', runs)
+          print('  arch    :', arch, '(run files byte-identical to beacon output)')
+          print('  analyzer:', prov['analyzer']['ciCommitSHA1'][:12])
+          print('  disk    :', sysinfo['dataDir'].get('source'),
                 '->', [x.get('name') for x in dev])
           for x in dev:
               print('    ', x.get('name'), 'rotational=', x.get('rotational'),
