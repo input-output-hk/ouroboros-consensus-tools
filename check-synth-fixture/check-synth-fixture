@@ -604,10 +604,24 @@ def check_synthesis(db_synthesizer, paths, db_dir, blocks, work_dir):
         )
     )
 
-    return results.count(False), forged, voted
+    # `mkAndStoreEb` forges an endorser block, stores it, and returns the
+    # announcement in one path. A count that differs means it left that path
+    # between two of the traces.
+    forged_ebs = sum(1 for e in events if e.get("kind") == "LeiosBlockForged")
+    stored_ebs = sum(1 for e in events if e.get("kind") == "LeiosBlockStored")
+    announced_ebs = sum(1 for e in events if e.get("kind") == "LeiosBlockAnnounced")
+    results.append(
+        check(
+            "every endorser block the forger makes is stored and announced",
+            forged_ebs > 0 and forged_ebs == stored_ebs == announced_ebs,
+            f"{forged_ebs} forged, {stored_ebs} stored, {announced_ebs} announced",
+        )
+    )
+
+    return results.count(False), forged, voted, events
 
 
-def check_leios_db(db_dir, announced, voted):
+def check_leios_db(db_dir, announced, voted, events):
     """Read the LeiosDb that db-synthesizer wrote. Returns the failure count."""
     results = []
     path = os.path.join(db_dir, "leios.db")
@@ -661,6 +675,40 @@ def check_leios_db(db_dir, announced, voted):
                 f"{voted} votes, {counts['ebs']} announcements",
             )
         )
+        # The trace names each endorser block the forger announced, and `ebs`
+        # holds the row it wrote for that block. Comparing the two hash sets
+        # catches a row that never landed. Comparing counts would not catch a
+        # hash that is repeated or swapped.
+        announced_hashes = {
+            e["ebHash"] for e in events if e.get("kind") == "LeiosBlockAnnounced"
+        }
+        stored_hashes = {
+            row[0].hex() for row in conn.execute("SELECT ebHashBytes FROM ebs")
+        }
+        results.append(
+            check(
+                "the LeiosDb holds a row for every announced endorser block",
+                bool(announced_hashes) and announced_hashes == stored_hashes,
+                f"{len(announced_hashes)} announced, {len(stored_hashes)} stored,"
+                f" {len(announced_hashes ^ stored_hashes)} unmatched",
+            )
+        )
+
+        # `numTxs` is what the forger put in each endorser block, and `ebTxs`
+        # holds one row per (block, position). The check below on
+        # `missingTxCount` cannot see a shortfall here, because the LeiosDb
+        # derives that column from its own rows.
+        traced_txs = sum(
+            e["numTxs"] for e in events if e.get("kind") == "LeiosBlockForged"
+        )
+        results.append(
+            check(
+                "the LeiosDb holds a closure entry for every endorsed transaction",
+                traced_txs > 0 and traced_txs == counts["ebTxs"],
+                f"{traced_txs} traced, {counts['ebTxs']} rows",
+            )
+        )
+
         # Every check below reads the announced rows. With no rows they all pass
         # on nothing, which reads as a clean run over an empty database.
         if counts["ebs"] == 0:
@@ -774,7 +822,7 @@ def check_immutalisation(db_immutaliser, paths, db_dir, work_dir):
     return results.count(False)
 
 
-def check_analysis(db_analyser, paths, db_dir, forged, work_dir):
+def check_analysis(db_analyser, paths, db_dir, forged, work_dir, events):
     """Re-apply every block and count them. Returns the failure count."""
     results = []
     out = run_tool(
@@ -842,6 +890,19 @@ def check_analysis(db_analyser, paths, db_dir, forged, work_dir):
             "the chain holds a certifying block",
             bool(certifying),
             f"{len(certifying)} certifying, {len(announcing)} carrying their own",
+        )
+    )
+
+    # `decideLeiosCertify` traces one event per certificate it assembles, and
+    # `mkBody` embeds it. db-analyser reads the chain back and finds the blocks
+    # that carry one. A difference means a certificate was decided and never
+    # embedded, or the other way round.
+    traced_certs = sum(1 for e in events if e.get("kind") == "LeiosBlockCertified")
+    results.append(
+        check(
+            "every certificate the forger assembled reached a block",
+            traced_certs == len(certifying),
+            f"{traced_certs} traced, {len(certifying)} on the chain",
         )
     )
 
@@ -1024,7 +1085,7 @@ def main():
         print("note  no cardano-cli found, so the genesis is not compared against the credentials")
 
     print()
-    synth_failures, forged, voted = check_synthesis(
+    synth_failures, forged, voted, events = check_synthesis(
         db_synthesizer, paths, db_dir, args.blocks, work_dir
     )
     failures += synth_failures
@@ -1035,9 +1096,11 @@ def main():
     failures += check_immutalisation(db_immutaliser, paths, db_dir, work_dir)
     # `check_leios_db` runs after the analysis, because the analysis is what
     # tells it how many blocks announced rather than certified.
-    analysis_failures, announced = check_analysis(db_analyser, paths, db_dir, forged, work_dir)
+    analysis_failures, announced = check_analysis(
+        db_analyser, paths, db_dir, forged, work_dir, events
+    )
     failures += analysis_failures
-    failures += check_leios_db(db_dir, announced, voted)
+    failures += check_leios_db(db_dir, announced, voted, events)
     failures += check_era(db_dir)
     failures += check_leios_analysis(CHECK_LEIOS_ANALYSIS, db_analyser, paths, db_dir, work_dir)
 
