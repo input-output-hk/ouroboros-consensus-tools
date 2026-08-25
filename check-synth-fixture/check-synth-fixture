@@ -176,8 +176,6 @@ FORGED_RE = re.compile(r"^--> forged and adopted (\d+) blocks; reached SlotNo (\
 CANDIDATES_RE = re.compile(r"^Number of candidates: (\d+)$", re.M)
 IMMUTALISED_RE = re.compile(r"^Copied to ImmutableDB, new tip is (.*)$", re.M)
 COUNTED_RE = re.compile(r"Counted (\d+) blocks\.", re.M)
-COMMITTEE_RE = re.compile(r"^--> committee: (.*)$", re.M)
-VOTES_RE = re.compile(r"^--> votes: (\d+) cast, (\d+) certified$", re.M)
 EB_COUNT_RE = re.compile(r"^\[[^]]*\] BlockNo \d+\s+SlotNo \d+\s+cumulative: (\d+)\s+count: (\d+)\s+EB count: (\d+)$", re.M)
 
 
@@ -504,6 +502,25 @@ def run_tool(argv, log_path):
     return text
 
 
+def leios_events(out):
+    """Parse the Leios trace lines out of a tool's output.
+
+    db-synthesizer writes one JSON object per Leios event to stderr, and
+    `run_tool` merges stderr into the text it returns. Every other line is
+    plain text, so a line that does not start with `{` is not an event.
+    """
+    events = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return events
+
+
 def check_synthesis(db_synthesizer, paths, db_dir, blocks, work_dir):
     """Forge a chain. Returns the failure count and the blocks forged."""
     results = []
@@ -553,19 +570,29 @@ def check_synthesis(db_synthesizer, paths, db_dir, blocks, work_dir):
         )
     )
 
-    m = COMMITTEE_RE.search(out)
-    seating = m.group(1) if m else ""
+    events = leios_events(out)
+
+    # `reportCommittee` sends its line through `MkTraceLeiosKernel`, and so
+    # does `decideLeiosCertify`. The prefix picks ours out.
+    prefix = "committee: "
+    seating = ""
+    for e in events:
+        msg = e.get("msg", "")
+        if e.get("kind") == "LeiosKernelMsg" and msg.startswith(prefix):
+            seating = msg[len(prefix):]
+            break
     results.append(
         check(
             "the forger's BLS key holds a committee seat",
-            bool(m) and "our seat: none" not in seating,
-            seating or "no committee line",
+            bool(seating) and "our seat: none" not in seating,
+            seating or "no committee event",
         )
     )
 
-    m = VOTES_RE.search(out)
-    voted = int(m.group(1)) if m else 0
-    certified = int(m.group(2)) if m else 0
+    voted = sum(1 for e in events if e.get("kind") == "LeiosVoted")
+    # `TraceLeiosCertified` fires every time the tally for an announcing block
+    # crosses the threshold, so it can repeat for one block. Count the blocks.
+    certified = len({e["rbHash"] for e in events if e.get("kind") == "LeiosCertified"})
 
     # The fixture registers one pool and gives it every lovelace of stake, so its
     # single vote carries the whole weight and crosses the threshold on its own.
