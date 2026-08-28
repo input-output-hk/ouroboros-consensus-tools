@@ -143,12 +143,17 @@ data Selector = Selector {
 
 selSlot, selMut, selMutForecast, selMutBlockTick, selMutBlockApply, selTotalTime, selAllocatedBytes, selTotalOverMut, selTableReadTime, selMutTableRead :: Selector
 selSlot             = Selector "slot"           (fromIntegral . unSlotNo . slot)  ""    True
+-- | Mutator time over the same window as 'selTotalTime' -- the
+-- ledger-table fetch plus the 5 ledger operations -- i.e. that window
+-- minus its GC pauses.
 selMut              = Selector "mut"            (fromIntegral . mut)              "μs"  True
 selMutForecast      = Selector "mut_forecast"   (fromIntegral . mut_forecast)     "μs"  True
 -- | Elapsed time fetching this block's ledger tables (e.g. the on-disk
--- backend's UTxO-table reads), timed *before* the window that produces
--- 'selMut'\/all the other @mut_*@ selectors -- none of those include this
--- cost. See 'selTotalTime' for the sum.
+-- backend's UTxO-table reads), which precedes the 5 ledger operations.
+-- 'selTotalTime' and 'selMut' already include this cost -- subtract this
+-- to get the 5 operations on their own -- whereas the per-operation
+-- @mut_*@ selectors ('selMutForecast', 'selMutBlockTick', ...) never do.
+-- See 'tableReadTime' for the db-analyser build this assumes.
 selTableReadTime    = Selector "tableReadTime"  (fromIntegral . tableReadTime)    "μs"  True
 -- | Mutator-only companion of 'selTableReadTime' (mirrors 'selMut' vs
 -- 'selTotalTime'): comparing the two surfaces GC/blocking time during
@@ -162,11 +167,10 @@ selMutTableRead     = Selector "mut_tableRead"  (fromIntegral . mut_tableRead)  
 -- epoch boundary -- see 'summarizeEpochBoundaryImpact'.
 selMutBlockTick     = Selector "mut_blockTick"  (fromIntegral . mut_blockTick)    "μs"  True
 selMutBlockApply    = Selector "mut_blockApply" (fromIntegral . mut_blockApply)   "μs"  True
--- | The complete per-block wall-clock cost, including the ledger-table
--- fetch ('selTableReadTime') that precedes the 5 ledger operations:
--- 'totalTime' already includes it (requires a @db-analyser@ build where
--- the RTS-stats window for @totalTime@\/@mut@\/@gc@ starts before that
--- fetch, not just after it).
+-- | The complete per-block wall-clock cost, as db-analyser reports it:
+-- the ledger-table fetch ('selTableReadTime') plus the 5 ledger
+-- operations that follow it. See 'totalTime' for the exact window, and
+-- for the build caveat that comes with reading it that way.
 selTotalTime        = Selector "totalTime"      (fromIntegral . totalTime)        "μs"  True
 selAllocatedBytes   = Selector "allocatedBytes" (fromIntegral . allocatedBytes)   "B"   True
 -- | Wall-clock time relative to mutator time, per slot: how many times
