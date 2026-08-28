@@ -1,0 +1,491 @@
+name: Glue distributable
+
+# Phase 1 of the ouroboros-leios#1048 distributable: linking and relocation.
+#
+# The claim being tested is not "it builds" but "it starts on a machine whose
+# glibc is older than the one it was built against". Measured: these binaries
+# reference symbols up to GLIBC_2.38, while RHEL 8 has 2.28, RHEL 9 and Amazon
+# Linux 2023 have 2.34, and Ubuntu 22.04 has 2.35. So glibc and its loader are
+# bundled, and the container matrix below is the acceptance gate -- relying on
+# the host's loader would fail every one of those.
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+  pull_request:
+  merge_group:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build and relocate (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 350
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            system: x86_64-linux
+            # consensus's flake declares x86_64-linux, so db-analyser
+            # substitutes from cache.iog.io: a ~45 MiB download.
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            system: aarch64-linux
+            # consensus's flake does not declare aarch64-linux, so db-analyser
+            # is built from source here -- natively, because Template Haskell
+            # cannot cross architectures. Expect the better part of an hour on
+            # a cold runner.
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo rm -rf /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      - name: Install nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://cache.iog.io
+            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
+            allow-import-from-derivation = true
+
+      - name: Check nix formatting
+        run: nix run nixpkgs#alejandra -- --check flake.nix flake nix perSystem
+
+      # docs/SPO-PREREQUISITES.md states which platforms are tested. If that
+      # list and this workflow's matrix drift apart, the document becomes
+      # confident fiction -- which is precisely how the tar/gzip and glibc
+      # claims in it got written wrong in the first place.
+      - name: Prerequisites doc matches the tested matrix
+        run: |
+          set -euo pipefail
+          doc=docs/SPO-PREREQUISITES.md
+
+          # Backticks are stripped up front rather than matched: in GNU grep's
+          # ERE, \` is the start-of-buffer anchor, not an escaped backtick, so a
+          # pattern containing it silently matches nothing -- and under pipefail
+          # that fails the step with no output at all.
+          tr -d '`' < "$doc" > /tmp/doc-plain
+
+          # Only the matrix entries: this file also contains the pattern used
+          # to find them, and grepping itself picked that up as an image name.
+          grep -oE '^ +- \{ runner: [^}]*image: "[^"]+"' .github/workflows/glue.yml \
+            | grep -oE 'image: "[^"]+"' | sed 's/image: //; s/"//g' \
+            | sort -u > /tmp/matrix
+          echo "images tested by this workflow:"; sed 's/^/  /' /tmp/matrix
+
+          grep -oE '(rockylinux|amazonlinux|ubuntu|debian|fedora|alpine):[0-9][^ |]*' \
+            /tmp/doc-plain | sort -u > /tmp/doc-images
+          echo "images the document claims are tested:"; sed 's/^/  /' /tmp/doc-images
+
+          missing=0
+          while read -r img; do
+            grep -qx "$img" /tmp/doc-images || {
+              echo "::error::$img is tested but not listed in $doc"; missing=1; }
+          done < /tmp/matrix
+          while read -r img; do
+            grep -qx "$img" /tmp/matrix || {
+              echo "::error::$doc claims $img is tested, but the matrix does not"; missing=1; }
+          done < /tmp/doc-images
+
+          test "$missing" -eq 0
+
+      # Result symlinks go to /tmp, never into the checkout: an untracked
+      # `result` makes the flake's git tree dirty.
+      - name: Build the relocatable payload
+        run: nix build .#glue-relocatable --print-build-logs -o /tmp/reloc
+
+      - name: Verify the relocation is complete
+        run: |
+          set -euo pipefail
+          cp -RL /tmp/reloc /tmp/tree
+          chmod -R u+w /tmp/tree
+
+          echo "--- bundled libraries ---"
+          ls /tmp/tree/lib
+          echo "loader: $(cat /tmp/tree/share/loader)"
+
+          # glibc must be among them; without it the whole approach collapses
+          # back to depending on the host's C library.
+          test -e "/tmp/tree/lib/libc.so.6"
+          test -e "/tmp/tree/lib/$(cat /tmp/tree/share/loader)"
+
+          echo "--- interpreter patch table ---"
+          cat /tmp/tree/share/interp.offsets
+
+          # RPATH must be $ORIGIN-relative, or the tree only works where built.
+          for b in /tmp/tree/bin/*; do
+            nix run nixpkgs#patchelf -- --print-interpreter "$b" >/dev/null 2>&1 || continue
+            rpath=$(nix run nixpkgs#patchelf -- --print-rpath "$b")
+            echo "$(basename "$b"): rpath=$rpath"
+            # shellcheck disable=SC2016  # $ORIGIN is a literal, not a variable
+            case "$rpath" in
+              '$ORIGIN/../lib') ;;
+              *) echo "::error::$(basename "$b") has a non-relative rpath: $rpath"; exit 1 ;;
+            esac
+          done
+
+          # Nothing under lib/ may still name the store.
+          if grep -rIl "/nix/store" /tmp/tree/bin /tmp/tree/lib 2>/dev/null | grep .; then
+            echo "::error::store paths remain in the relocated tree"
+            exit 1
+          fi
+
+      # nix's fixupPhase rewrites `#!/bin/sh` to a store bash, which does not
+      # exist on the target. This regressed once and the failure surfaced only
+      # inside a container, so assert it at build time.
+      - name: Shebangs point at the host shell, not the store
+        run: |
+          set -euo pipefail
+          for f in /tmp/tree/scripts/*.sh; do
+            head -1 "$f"
+            head -1 "$f" | grep -qx '#!/bin/sh' || {
+              echo "::error::$(basename "$f") has a rewritten shebang"; exit 1; }
+          done
+
+      # Parse the hardware report with a real parser here, rather than only
+      # grepping it in the containers. It is assembled by hand in shell, so a
+      # field that is absent on one architecture and present on another can
+      # produce invalid JSON -- which is how `"physicalCores": ,` reached the
+      # aarch64 end-to-end job, /proc/cpuinfo having no "cpu cores" line on ARM.
+      # Catching it here costs seconds instead of a full benchmark.
+      - name: Hardware report is valid JSON
+        run: |
+          set -euo pipefail
+          /tmp/tree/scripts/spo-sysinfo.sh /tmp > /tmp/sysinfo.json
+          python3 -c "
+          import json, sys
+          d = json.load(open('/tmp/sysinfo.json'))
+          assert d['schemaVersion'] == 1
+          assert d['os']['architecture'], 'architecture missing'
+          print('valid JSON on', d['os']['architecture'])
+          print('  cpu   :', d['cpu']['model'])
+          print('  cores :', d['cpu']['logicalCpus'], 'logical,',
+                d['cpu']['physicalCores'], 'physical')
+          print('  disk  :', d['dataDir'].get('source'),
+                '->', [x.get('name') for x in d['dataDir'].get('physicalDevices', [])])
+          print('  unavailable:', len(d['unavailable']), 'field(s)')
+          "
+
+      - name: Build the single-file artifact
+        run: |
+          set -euo pipefail
+          nix build .#glue --print-build-logs -o /tmp/glue-exe
+          cp -L /tmp/glue-exe /tmp/glue
+          chmod +x /tmp/glue
+          echo "artifact: $(stat -c%s /tmp/glue | numfmt --to=iec)"
+          sha256sum /tmp/glue | tee /tmp/glue.sha256
+
+      - name: Upload the artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: glue-${{ matrix.system }}
+          path: |
+            /tmp/glue
+            /tmp/glue.sha256
+          retention-days: 14
+
+  # The acceptance gate. Each of these has a glibc older than the 2.38 the
+  # binaries reference, so all three would fail if we used the host's loader.
+  # `beacon --help` starting is the whole assertion; running a benchmark needs
+  # offline analyzer resolution, which is phase 2.
+  old-distros:
+    name: ${{ matrix.system }} on ${{ matrix.image }}
+    runs-on: ${{ matrix.runner }}
+    needs: build
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,    system: x86_64-linux,  image: "rockylinux:8" }
+          - { runner: ubuntu-latest,    system: x86_64-linux,  image: "amazonlinux:2023" }
+          - { runner: ubuntu-latest,    system: x86_64-linux,  image: "ubuntu:22.04" }
+          - { runner: ubuntu-latest,    system: x86_64-linux,  image: "debian:12" }
+          # Rocky 8 has no official arm64 image on Docker Hub, so aarch64 is
+          # checked against the oldest glibc that does: Ubuntu 22.04 (2.35).
+          - { runner: ubuntu-24.04-arm, system: aarch64-linux, image: "amazonlinux:2023" }
+          - { runner: ubuntu-24.04-arm, system: aarch64-linux, image: "ubuntu:22.04" }
+          - { runner: ubuntu-24.04-arm, system: aarch64-linux, image: "debian:12" }
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: glue-${{ matrix.system }}
+          path: /tmp/artifact
+
+      - name: Start it under ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          chmod +x /tmp/artifact/glue
+          docker run --rm \
+            -v /tmp/artifact:/artifact:ro \
+            -e GLUE_HOME=/tmp/glue-home \
+            ${{ matrix.image }} \
+            sh -eux -c '
+              (ldd --version 2>&1 || true) | head -1
+
+              # Some minimal container images ship neither tar nor gzip.
+              # amazonlinux:2023 is one, although the EC2 AMI has both. Install
+              # them here so this job tests the artifact rather than the package
+              # list of the image.
+              if ! command -v tar >/dev/null 2>&1 || ! command -v gzip >/dev/null 2>&1; then
+                (dnf install -y -q tar gzip || yum install -y -q tar gzip \
+                  || (apt-get update -qq && apt-get install -y -qq tar gzip) \
+                  || apk add --no-cache tar gzip) >/dev/null 2>&1
+              fi
+
+              cp /artifact/glue /tmp/glue
+              chmod +x /tmp/glue
+              /tmp/glue --help > /tmp/out 2>&1 || { cat /tmp/out; exit 1; }
+              head -5 /tmp/out
+
+              # Second run must reuse the unpacked tree rather than redo it.
+              /tmp/glue --help > /dev/null 2>&1
+              test -f /tmp/glue-home/*/.complete
+
+              # The claim phase 2 exists to prove: db-analyser is resolved with
+              # no nix and no network. `beacon build` is the step that would
+              # otherwise shell out to `nix build` and query the GitHub API, so
+              # it succeeding here -- in a container that has neither -- is the
+              # assertion. PATH deliberately excludes anything but the base
+              # system.
+              /tmp/glue provision /tmp/data
+              sha=$(sed -n "s/^ANALYZER_SHA=//p" /tmp/glue-home/*/share/pin.env)
+              # `glue beacon` rather than a bare passthrough: glue owns its own
+              # argument space now, and raw beacon access is explicit.
+              env -i PATH=/usr/bin:/bin HOME=/tmp GLUE_HOME=/tmp/glue-home \
+                /tmp/glue beacon --data-dir /tmp/data build --rev "$sha" > /tmp/build 2>&1 \
+                || { cat /tmp/build; exit 1; }
+              cat /tmp/build
+              grep -q "already built and linked" /tmp/build
+              grep -q "found commit in cache" /tmp/build
+
+              # The hardware report must emit parseable JSON on every one of
+              # these, degrading field by field rather than failing.
+              /tmp/glue sysinfo /tmp/data > /tmp/sysinfo.json
+              head -20 /tmp/sysinfo.json
+              # No parser is guaranteed present in these images, so check the
+              # shape crudely but meaningfully.
+              grep -q "\"schemaVersion\": 1" /tmp/sysinfo.json
+              grep -q "\"physicalDevices\"" /tmp/sysinfo.json
+              tail -1 /tmp/sysinfo.json | grep -q "^}$"
+
+              # The fragment table must be readable without any of it being
+              # downloaded.
+              /tmp/glue fetch -l | grep -q "107-praos-768k"
+
+              # With no runs stored yet the report must refuse rather than
+              # emit an empty document that looks like a result.
+              if /tmp/glue report -d /tmp/data > /tmp/rep 2>&1; then
+                echo "::error::report succeeded with no runs stored"; exit 1
+              fi
+              grep -q "no runs found" /tmp/rep
+
+              # A bare invocation must do the whole job rather than fall
+              # through to the developer usage of beacon -- but it must refuse
+              # to download ~800 MiB with nobody attached to confirm it.
+              if /tmp/glue < /dev/null > /tmp/bare 2>&1; then
+                echo "::error::bare invocation downloaded without confirmation"
+                cat /tmp/bare; exit 1
+              fi
+              cat /tmp/bare
+              grep -q "Re-run with --yes" /tmp/bare
+
+              # --help must describe the SPO workflow, not the beacon one.
+              /tmp/glue --help > /tmp/h 2>&1
+              grep -q "Runs the whole benchmark" /tmp/h
+              grep -q "glue provision" /tmp/h
+
+              # A leading option must reach the run-all script, not beacon.
+              # `glue --yes` previously fell through and beacon rejected it,
+              # which broke the end-to-end job.
+              if /tmp/glue --yes -d /tmp/nowhere-xyz > /tmp/y 2>&1; then
+                echo "::error::--yes unexpectedly succeeded"; cat /tmp/y; exit 1
+              fi
+              if grep -q "Invalid option" /tmp/y; then
+                echo "::error::--yes reached beacon instead of the run-all script"
+                cat /tmp/y; exit 1
+              fi
+
+              # Raw beacon access stays available, explicitly.
+              /tmp/glue beacon --help > /tmp/b 2>&1 || true
+              grep -q "Usage: beacon" /tmp/b
+
+              # The bundled helpers are present. That the launcher actually puts
+              # them ahead of the host on PATH is only observable once beacon
+              # probes its capabilities, which happens on a real run -- so it is
+              # asserted in phase 3 rather than guessed at here.
+              test -x /tmp/glue-home/*/bin/jq
+              test -x /tmp/glue-home/*/bin/time
+            '
+
+  # The prerequisites document says the artifact refuses to unpack without tar
+  # and names the fix. Asserted rather than trusted: amazonlinux:2023 ships
+  # neither tar nor gzip, so it is the natural place to check.
+  missing-tar-message:
+    name: Fails cleanly without tar
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: glue-x86_64-linux
+          path: /tmp/artifact
+
+      - name: Refuses to unpack, and says how to fix it
+        run: |
+          set -euo pipefail
+          chmod +x /tmp/artifact/glue
+          if docker run --rm -v /tmp/artifact:/artifact:ro \
+               -e GLUE_HOME=/tmp/glue-home amazonlinux:2023 \
+               sh -c 'cp /artifact/glue /tmp/glue && chmod +x /tmp/glue && /tmp/glue --help' \
+               > /tmp/out 2>&1; then
+            echo "::error::expected failure without tar, but it succeeded"
+            exit 1
+          fi
+          cat /tmp/out
+          grep -q "needs 'tar'" /tmp/out
+          grep -q "dnf install -y tar gzip" /tmp/out
+
+  # The first run that actually exercises db-analyser end to end. Downloads a
+  # ~770 MiB fragment, so it is manual rather than on every push -- but it is
+  # the only thing that proves the bundled jq and GNU time are the ones beacon
+  # picks up, since that is only observable once capabilities are probed.
+  end-to-end:
+    name: Full benchmark, ${{ matrix.system }}
+    runs-on: ${{ matrix.runner }}
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 120
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,    system: x86_64-linux }
+          # The aarch64 artifact is built from a from-source consensus rather
+          # than a cached one, so it is a genuinely different binary -- running
+          # a real benchmark on it is not implied by the x86_64 result.
+          - { runner: ubuntu-24.04-arm, system: aarch64-linux }
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: glue-${{ matrix.system }}
+          path: /tmp/artifact
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo rm -rf /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      - name: Fetch a fragment and benchmark it
+        run: |
+          set -euo pipefail
+          chmod +x /tmp/artifact/glue
+          export GLUE_HOME=/tmp/glue-home
+
+          # The single command an SPO actually runs. --yes because nothing is
+          # attached to confirm the download, and --apply-only to keep this
+          # bounded; the full matrix is what an SPO gets by default.
+          /tmp/artifact/glue --yes -d /tmp/data -n 107-praos-768k --apply-only 2>&1 \
+            | tee /tmp/bench.log
+
+          # GNU time was found, so memory and I/O figures were collected. Its
+          # absence is a warning rather than an error, which is exactly why it
+          # needs asserting.
+          if grep -q "time -v' unavailable" /tmp/bench.log; then
+            echo "::error::the bundled GNU time was not picked up"
+            exit 1
+          fi
+          grep -q "Summary for" /tmp/bench.log
+
+          echo "--- stored runs ---"
+          ls /tmp/data/run
+
+          # The report is the artifact an SPO sends back, so assert it is
+          # whole: the run files present and unmodified, the hardware report and
+          # provenance parseable on their own. python and unzip are used here
+          # only as checkers; neither is required on an SPO's machine.
+          archive=$(find /tmp/data -maxdepth 1 -name 'glue-report-*.zip' | head -1)
+          test -n "$archive"
+          rm -rf /tmp/check && mkdir /tmp/check
+          # The bundled unzip, resolved to a path rather than left as a glob.
+          unzip_bin=$(find /tmp/glue-home -maxdepth 3 -path '*/bin/unzip' | head -1)
+          test -x "$unzip_bin"
+          "$unzip_bin" -q "$archive" -d /tmp/check
+          find /tmp/check -type f | sed 's|/tmp/check/||' | sort
+
+          python3 - /tmp/check <<'PY'
+          import json, os, sys, glob, hashlib
+
+          root = glob.glob(os.path.join(sys.argv[1], 'glue-report-*'))[0]
+
+          # Each file must parse on its own. That is the point of the layout:
+          # one bad file cannot invalidate the others.
+          prov = json.load(open(os.path.join(root, 'provenance.json')))
+          sysinfo = json.load(open(os.path.join(root, 'sysinfo.json')))
+          assert prov['reportVersion'] == 2
+          assert prov['analyzer']['assertionsDisabled'] is True, \
+              'a benchmark built with assertions on is not a valid measurement'
+          pinned = prov['analyzer']['pinnedTo']
+          assert pinned, 'analyzer pin missing'
+          assert sysinfo['schemaVersion'] == 1
+
+          arch = sysinfo['os'].get('architecture')
+          expected = '${{ matrix.system }}'.split('-')[0]
+          assert arch == expected, f'report says {arch}, expected {expected}'
+
+          runs = {}
+          for slug in sorted(os.listdir(os.path.join(root, 'runs'))):
+              files = sorted(glob.glob(os.path.join(root, 'runs', slug, 'run-*.json')))
+              assert files, f'{slug} has no run files'
+              for f in files:
+                  d = json.load(open(f))
+                  assert d['data'], f'{f} has no datapoints'
+                  # provenance says what the build was pinned to; each run says
+                  # what it used. Disagreement means the archive describes a
+                  # measurement it did not take.
+                  used = d['meta']['commit']['ciCommitSHA1']
+                  assert pinned.startswith(used) or used.startswith(pinned), \
+                      f'{f} used {used}, build pinned to {pinned}'
+              runs[slug] = len(files)
+          assert runs, 'no runs in the report'
+
+          # The run files must be the bytes beacon wrote, not a re-serialisation:
+          # the receiving end feeds them straight back into beacon.
+          for slug in runs:
+              for f in glob.glob(os.path.join(root, 'runs', slug, 'run-*.json')):
+                  orig = os.path.join('/tmp/data/run', slug, os.path.basename(f))
+                  a = hashlib.sha256(open(orig, 'rb').read()).hexdigest()
+                  b = hashlib.sha256(open(f, 'rb').read()).hexdigest()
+                  assert a == b, f'{os.path.basename(f)} was modified in the report'
+
+          dev = sysinfo['dataDir'].get('physicalDevices', [])
+          print('report OK:', runs)
+          print('  arch    :', arch, '(run files byte-identical to beacon output)')
+          print('  analyzer:', pinned[:12], '(matches every run file)')
+          print('  disk    :', sysinfo['dataDir'].get('source'),
+                '->', [x.get('name') for x in dev])
+          for x in dev:
+              print('    ', x.get('name'), 'rotational=', x.get('rotational'),
+                    'writeCache=', x.get('writeCache'),
+                    'model=', repr(x.get('model')))
+          PY
