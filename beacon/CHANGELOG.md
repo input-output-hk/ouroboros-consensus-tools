@@ -1,10 +1,10 @@
 # Beacon Changelog
 
-##next
+## 0.5.0.0 -- 2026-08-28
 
 * Added `mut` (total mutator time) and `mut_blockTick` (ledger-tick time) reporting to `beacon summary`/`compare`, plus an epoch-boundary-crossing breakdown of `mut_blockTick`/`totalTime` (mirroring the major-GC split): ledger ticks that cross an epoch boundary do real extra work (reward/stake-snapshot computation) and are usually the dominant source of `totalTime` outliers, distinct from major GC.
 * Added a "neither major GC nor epoch boundary" steady-state breakdown, and per-tx mean/median alongside the existing per-block figures in both the major-GC and epoch-boundary breakdowns.
-* Added `tableReadTime`/`mut_tableRead` reporting, and folded the ledger-table fetch they measure into `totalTime` (requires a `db-analyser` build with matching instrumentation): that fetch -- where an on-disk backend's UTxO-table reads actually happen -- previously fell outside every per-block timer `db-analyser` reports, `totalTime` included.
+* Added `tableReadTime`/`mut_tableRead` reporting: the ledger-table fetch they measure -- where an on-disk backend's UTxO-table reads actually happen -- runs before the 5 ledger operations, and used to fall outside every per-block timer `db-analyser` reports. It is now part of `totalTime`/`mut`/`gc` for runs recorded by a `db-analyser` built from `ouroboros-consensus@0ebd397da` or later, which is what `beacon` assumes; a run from an older build excludes it there, and nothing in the run's JSON distinguishes the two.
 
 ## 0.4.0.0 -- 2026-08-18
 
