@@ -88,11 +88,15 @@ doCompare beaconDir chains runA_@BeaconRun{rMeta = metaA} mRunB
       putStrLn ""
       mEpochLength <- maybe (pure Nothing) (loadEpochLength beaconDir) ch
       forM_ mEpochLength $ \epochLength -> do
-        summarizeEpochBoundaryImpact epochLength run selMutBlockTick
+        -- pin down the boundary-adjacent blocks on the full processed
+        -- sequence, before any tx-count filtering can hide the block that
+        -- actually paid for the epoch transition
+        let boundarySlots = epochBoundarySlots epochLength (unPoints (rData run))
+        summarizeEpochBoundaryImpact boundarySlots run selMutBlockTick
         putStrLn ""
-        summarizeEpochBoundaryImpact epochLength run selTotalTime
+        summarizeEpochBoundaryImpact boundarySlots run selTotalTime
         putStrLn ""
-        summarizeSteadyStateImpact epochLength run selTotalTime
+        summarizeSteadyStateImpact boundarySlots run selTotalTime
         putStrLn ""
       printProcessStats        run
       putStrLn ""
@@ -284,12 +288,15 @@ summarizeMajorGcImpact run selector = do
 -- epoch boundary triggers real extra ledger work (reward\/stake-snapshot
 -- computation) in 'mut_blockTick' -- rather than a threshold picked from
 -- this run's own distribution.
-summarizeEpochBoundaryImpact :: Word64 -> BeaconRun -> Selector -> IO ()
-summarizeEpochBoundaryImpact epochLength run selector = do
+-- @boundarySlots@ is expected to come from 'epochBoundarySlots' over the
+-- run's unfiltered data points; a boundary-adjacent block that the sample's
+-- tx-count filter drops then shows up in neither subset, rather than
+-- displacing the flag onto an unaffected block.
+summarizeEpochBoundaryImpact :: Set SlotNo -> BeaconRun -> Selector -> IO ()
+summarizeEpochBoundaryImpact boundarySlots run selector = do
     mSample <- selectMaxTxSample run
     forM_ mSample $ \(n, points) -> do
-      let boundarySlots       = epochBoundarySlots epochLength points
-          (affected, steady)  = V.partition ((`Set.member` boundarySlots) . slot) points
+      let (affected, steady) = V.partition ((`Set.member` boundarySlots) . slot) points
       printStyled StyleInfo $ "epoch boundary crossed: " ++ show (V.length affected) ++ " / " ++ show (V.length points) ++ " blocks"
       reportSubset n selector "blocks w/o epoch-boundary tick" steady
       reportSubset n selector "blocks w/  epoch-boundary tick" affected
@@ -299,27 +306,29 @@ summarizeEpochBoundaryImpact epochLength run selector = do
 -- by neither known cause of outliers at once. Only this "w/o both" side is
 -- reported -- the "w/ either" side is already covered by the two impact
 -- reports above, and its blocks overlap with theirs, not with each other.
-summarizeSteadyStateImpact :: Word64 -> BeaconRun -> Selector -> IO ()
-summarizeSteadyStateImpact epochLength run selector = do
+summarizeSteadyStateImpact :: Set SlotNo -> BeaconRun -> Selector -> IO ()
+summarizeSteadyStateImpact boundarySlots run selector = do
     mSample <- selectMaxTxSample run
     forM_ mSample $ \(n, points) -> do
-      let boundarySlots = epochBoundarySlots epochLength points
-          steady         = V.filter (\p -> majGcCount p == 0 && slot p `Set.notMember` boundarySlots) points
+      let steady = V.filter (\p -> majGcCount p == 0 && slot p `Set.notMember` boundarySlots) points
       printStyled StyleInfo $
         "neither major GC nor epoch boundary: " ++ show (V.length steady) ++ " / " ++ show (V.length points) ++ " blocks"
       reportSubset n selector "slots w/o major GC and w/o epoch-boundary tick" steady
 
--- | Slots (within the given, slot-ascending sample) whose ledger tick
--- crossed into a different epoch than the previous sample slot. The very
--- first slot in the sample is never flagged: whether it itself crossed a
--- boundary depends on data outside the sample, which we don't have.
-epochBoundarySlots :: Word64 -> Vector SlotDataPoint -> Set SlotNo
+-- | Slots whose ledger tick crossed into a different epoch than the
+-- previously processed block's slot. Feed this the run's full,
+-- slot-ascending sequence of data points, never a filtered subset of it:
+-- the block charged for an epoch transition is the first one db-analyser
+-- /processed/ after the boundary, so dropping blocks first (e.g. via
+-- 'selectMaxTxSample') would move the flag onto a later block whose tick
+-- never crossed anything. The very first slot is never flagged: whether it
+-- itself crossed a boundary depends on data outside the run, which we
+-- don't have.
+epochBoundarySlots :: Word64 -> [SlotDataPoint] -> Set SlotNo
 epochBoundarySlots epochLength points =
   Set.fromList
     [ slot cur
-    | i <- [1 .. V.length points - 1]
-    , let prev = points V.! (i - 1)
-          cur  = points V.! i
+    | (prev, cur) <- zip points (drop 1 points)
     , epochOf (slot prev) /= epochOf (slot cur)
     ]
   where
