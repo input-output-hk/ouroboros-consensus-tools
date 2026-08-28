@@ -151,6 +151,18 @@ cache, while the GC time for that block increased sharply instead. So
 `totalTime` is the only field that can answer "how expensive was this
 block, including GC and any disk I/O it triggered."
 
+That last claim holds only if `totalTime`'s window also covers the
+ledger-table fetch that precedes the five ledger operations — which is
+where an on-disk backend's UTxO reads actually happen. It does for
+`db-analyser` built from `ouroboros-consensus@0ebd397da` onwards: those
+builds start the `totalTime`/`mut`/`gc` window before the fetch, and
+additionally report the fetch on its own as `tableReadTime`/`mut_tableRead`
+(so the five operations alone are `totalTime - tableReadTime`). Older
+builds start the window after the fetch, leaving that cost outside every
+per-block timer they report. Nothing in a run's JSON says which build
+wrote it; `beacon` reads the newer semantics, so against a run recorded by
+an older build `totalTime` undercounts by the fetch.
+
 *Open question:* why the cost lands specifically in `gc` rather than `mut`
 isn't fully pinned down. Checking `blockio-uring` (the LSM backend's I/O
 layer) rules out a couple of tempting explanations: its read/write buffers
