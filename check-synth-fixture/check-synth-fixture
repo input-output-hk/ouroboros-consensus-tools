@@ -36,7 +36,7 @@ It runs three tools over one fixture directory, then reads what they wrote:
   `eraProtVerLow <= curProtVer`, and Dijkstra's low version is 12.
 - The genesis registers exactly one pool, that pool's map key matches its own
   `poolId`, and every stake credential delegates to it.
-- The pool carries a `leiosKey` of two even-length hex strings. The ledger reads
+- The pool carries a `blsKey` of two even-length hex strings. The ledger reads
   this field as optional, so a wrong shape degrades to a keyless committee seat
   in silence.
 - `keys/payment.skey` exists, and `initialFunds` holds the address of that key
@@ -338,21 +338,21 @@ def check_fixture(paths):
         )
     )
 
-    leios_key = pool.get("leiosKey")
-    if not isinstance(leios_key, dict):
-        results.append(check("the pool registers a leiosKey", False, f"leiosKey is {type(leios_key).__name__}"))
+    bls_key = pool.get("blsKey")
+    if not isinstance(bls_key, dict):
+        results.append(check("the pool registers a blsKey", False, f"blsKey is {type(bls_key).__name__}"))
     else:
         bad = []
         sizes = []
-        for field in ("leiosPubKey", "leiosPossessionProof"):
-            v = leios_key.get(field)
+        for field in ("blsPubKey", "blsPossessionProof"):
+            v = bls_key.get(field)
             if not isinstance(v, str) or not HEX_RE.match(v) or len(v) % 2:
                 bad.append(field)
             else:
                 sizes.append(f"{field} {len(v) // 2} bytes")
         results.append(
             check(
-                "the pool registers a leiosKey of even-length hex",
+                "the pool registers a blsKey of even-length hex",
                 not bad,
                 ", ".join(sizes) if not bad else "malformed: " + ", ".join(bad),
             )
