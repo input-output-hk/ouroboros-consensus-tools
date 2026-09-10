@@ -9,7 +9,7 @@ signing key. This script makes the keys and then rewrites the parts of
 `shelley-genesis.json` that are derived from them:
 
 - `staking.pools`, whose one entry names the pool that forges the chain. Its
-  `poolId`, `vrf`, and `leiosKey` all come from the keys below.
+  `poolId`, `vrf`, and `blsKey` all come from the keys below.
 - `staking.stake`, whose one entry delegates to that pool.
 - `initialFunds`, which gains the address of the payment key.
 
@@ -17,8 +17,8 @@ Run it once after a checkout, then run `check-synth-fixture`.
 
 It needs a `cardano-cli` from the `leios-prototype` branch of
 https://github.com/IntersectMBO/cardano-cli/, which is the branch that has the
-Dijkstra era commands. Pass `--cardano-cli`, set `CARDANO_CLI`, or put it on
-`PATH`.
+Dijkstra era commands and the BLS key ones. Pass `--cardano-cli`, set
+`CARDANO_CLI`, or put it on `PATH`.
 
 The keys hold nothing. They sign a synthetic chain that starts at the genesis
 beside them, and that chain reaches no network.
@@ -31,6 +31,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 # `kes-period 0` covers a whole epoch: the genesis sets `slotsPerKESPeriod` to
 # 129600 against an `epochLength` of 86400.
@@ -49,6 +50,17 @@ ENTERPRISE_TESTNET_HEADER = "60"
 # `cardano-cli` writes a key as a CBOR byte string inside a text envelope. The
 # header is 0x58 and then the length, so the raw key starts four hex digits in.
 CBOR_BYTESTRING_HEADER_HEX = 4
+
+# The proof of possession inside a registration certificate: 0x58 0x30, the CBOR
+# header of a 48-byte byte string, and then the 48 bytes.
+POSSESSION_PROOF_HEADER_HEX = "5830"
+POSSESSION_PROOF_HEX = 96
+
+# What the throwaway registration certificate says. None of it reaches the proof
+# of possession, and nothing submits the certificate.
+POOL_COST = 340000000
+POOL_MARGIN = 0.02
+TESTNET_MAGIC = 42
 
 
 def parse_args():
@@ -100,6 +112,59 @@ def raw_key(path):
         return json.load(f)["cborHex"][CBOR_BYTESTRING_HEADER_HEX:]
 
 
+def possession_proof(cardano_cli, keys):
+    """The proof of possession of a BLS key, as hex.
+
+    `cardano-cli` used to write one with `node issue-pop-BLS`, and that command
+    is gone: stake pool registration derives the proof from the signing key, so
+    the file it wrote had no reader. This builds a registration certificate that
+    nothing submits, and reads the proof back out of it.
+
+    The certificate holds the two BLS fields next to each other, the 96-byte
+    public key and then the 48-byte proof, each as a CBOR byte string. So the
+    proof is what follows the public key.
+    """
+    k = lambda name: os.path.join(keys, name)
+    pub_key = raw_key(k("bls.vkey"))
+    with tempfile.TemporaryDirectory() as work:
+        w = lambda name: os.path.join(work, name)
+        # The certificate needs a reward account and an owner. Neither reaches
+        # the proof, so one throwaway key covers both.
+        cli(
+            cardano_cli, "stake-address", "key-gen",
+            "--verification-key-file", w("stake.vkey"),
+            "--signing-key-file", w("stake.skey"),
+        )
+        cli(
+            cardano_cli, "stake-pool", "registration-certificate",
+            "--cold-verification-key-file", k("cold.vkey"),
+            "--vrf-verification-key-file", k("vrf.vkey"),
+            "--bls-signing-key-file", k("bls.skey"),
+            "--pool-pledge", "0",
+            "--pool-cost", str(POOL_COST),
+            "--pool-margin", str(POOL_MARGIN),
+            "--pool-reward-account-verification-key-file", w("stake.vkey"),
+            "--pool-owner-stake-verification-key-file", w("stake.vkey"),
+            "--testnet-magic", str(TESTNET_MAGIC),
+            "--out-file", w("registration.cert"),
+        )
+        with open(w("registration.cert")) as f:
+            cert = json.load(f)["cborHex"]
+
+    if cert.count(pub_key) != 1:
+        fail(f"the registration certificate holds {cert.count(pub_key)} copies of the BLS public key")
+    rest = cert[cert.index(pub_key) + len(pub_key) :]
+    if not rest.startswith(POSSESSION_PROOF_HEADER_HEX):
+        fail(f"the bytes after the BLS public key are {rest[:8]}, not a 48-byte CBOR byte string")
+    return rest[len(POSSESSION_PROOF_HEADER_HEX) : len(POSSESSION_PROOF_HEADER_HEX) + POSSESSION_PROOF_HEX]
+
+
+def read_hex(path):
+    """The hex string a file holds, without its trailing newline."""
+    with open(path) as f:
+        return f.read().strip()
+
+
 def generate_keys(cardano_cli, keys):
     """Write every credential that the fixture needs into `keys`."""
     os.makedirs(keys, exist_ok=True)
@@ -134,11 +199,8 @@ def generate_keys(cardano_cli, keys):
         "--kes-period", str(KES_PERIOD),
         "--out-file", k("opcert.json"),
     )
-    cli(
-        cardano_cli, "node", "issue-pop-BLS",
-        "--bls-signing-key-file", k("bls.skey"),
-        "--out-file", k("bls.pop"),
-    )
+    with open(k("bls.pop"), "w") as f:
+        f.write(possession_proof(cardano_cli, keys) + "\n")
     cli(
         cardano_cli, "address", "key-gen",
         "--verification-key-file", k("payment.vkey"),
@@ -178,9 +240,9 @@ def rewrite_genesis(cardano_cli, genesis_path, keys):
 
     pool["poolId"] = pool_id
     pool["vrf"] = vrf_hash
-    pool["leiosKey"] = {
-        "leiosPubKey": raw_key(k("bls.vkey")),
-        "leiosPossessionProof": raw_key(k("bls.pop")),
+    pool["blsKey"] = {
+        "blsPubKey": raw_key(k("bls.vkey")),
+        "blsPossessionProof": read_hex(k("bls.pop")),
     }
     genesis["staking"]["pools"] = {pool_id: pool}
 
