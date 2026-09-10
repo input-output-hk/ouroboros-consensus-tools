@@ -45,8 +45,8 @@ Without such a block every other check holds and nothing is proven.
 
 It also runs `db-analyser` twice more, to check the two ways of failing on a Leios chain:
 
-- With no `leios.db` under the `--db` path and no `--stubbed-leios-db`, the tool must refuse to start, name the flag, and write no `leios.db`.
-- With `--stubbed-leios-db` on a chain that holds a certifying block, the tool must stop at that block and name the flag.
+- With no `leios.db` under the `--db` path and no `--no-leios-db`, the tool must refuse to start, name the flag, and write no `leios.db`.
+- With `--no-leios-db` on a chain that holds a certifying block, the tool must stop at that block and name the flag.
 
 ### --benchmark
 
