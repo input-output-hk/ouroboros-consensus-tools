@@ -205,11 +205,17 @@ jobs:
           d = json.load(open('/tmp/dm.json'))
           dd = d['dataDir']
           devs = [x['name'] for x in dd['physicalDevices']]
-          print('source :', dd.get('source'))
+          print('source :', dd.get('source'), '| via:', dd.get('resolvedVia'))
           print('devices:', devs)
           assert devs, 'no physical device resolved for a device-mapper mount'
           assert any(n.startswith('loop') for n in devs), \
               f'expected the backing loop device, got {devs}'
+          # The device-number lookup must be what found it. Without this the
+          # source-path fallback silently covers for a dead primary path --
+          # which is exactly what happened when findmnt's padded MAJ:MIN column
+          # made every lookup miss, for months, with every case still passing.
+          assert dd['resolvedVia'] == 'device-number', \
+              f"resolved via {dd['resolvedVia']}, expected device-number"
           assert not [u for u in d['unavailable'] if 'physicalDevices' in u], \
               'reported physicalDevices as unavailable despite resolving one'
           "

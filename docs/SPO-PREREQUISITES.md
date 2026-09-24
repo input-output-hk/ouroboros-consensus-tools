@@ -176,6 +176,11 @@ directory and re-run to relocate it.
 These are planned and **not** part of the current artifact. They will add host
 requirements when they land:
 
+The report records `dataDir.resolvedVia` — which method identified the disk
+(`device-number`, `source-path`, `zfs-pool` or `none`). It is there so a
+returned report shows which code path actually ran, rather than a fallback
+quietly covering for a broken one.
+
 - **ZFS pool members.** `sysinfo` resolves the disk behind LVM, dm-crypt, md,
   btrfs subvolumes and plain partitions. ZFS has no block device of its own, so
   it asks `zpool`, which normally needs root on Linux — run `sysinfo` as root if

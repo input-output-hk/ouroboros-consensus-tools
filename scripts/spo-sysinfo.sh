@@ -166,17 +166,26 @@ virt_block() {
 # -- so an LVM machine, which is most of them, reported no disk at all. The
 # device number does not have this problem: the kernel maintains
 # /sys/dev/block/MAJ:MIN for every mount that has a block device behind it.
+# Prints "<method> <kernel-name>" on success. The method travels in the output
+# rather than a variable because this runs in a command substitution, where an
+# assignment would be made in a subshell and lost.
 resolve_block_device() {
   path=$1
 
   # 1. Device number. Handles dm, md, plain partitions and whole disks.
   majmin=""
-  have findmnt && majmin=$(findmnt -no MAJ:MIN -T "$path" 2>/dev/null | head -1)
+  # --raw, and trimmed: without it findmnt right-aligns the column and emits
+  # "   0:48 ", which turns the sysfs lookup into /sys/dev/block/   0:48  and
+  # never matches. This path silently did nothing until it was tested against a
+  # real mount.
+  have findmnt && majmin=$(findmnt --raw -no MAJ:MIN -T "$path" 2>/dev/null |
+    head -1 | tr -d '[:space:]')
   if [ -z "$majmin" ]; then
     # st_dev, which Linux packs as
     #   major = (dev >> 8) & 0xfff
     #   minor = (dev & 0xff) | ((dev >> 12) & ~0xff)
     stdev=$(stat -c '%d' "$path" 2>/dev/null || true)
+    stdev=$(printf '%s' "$stdev" | tr -d '[:space:]')
     [ -n "$stdev" ] && majmin=$(awk -v d="$stdev" 'BEGIN {
       printf "%d:%d", int(d / 256) % 4096, (d % 256) + int(d / 1048576) * 256
     }')
@@ -184,7 +193,7 @@ resolve_block_device() {
   if [ -n "$majmin" ]; then
     target=$(readlink -f "/sys/dev/block/$majmin" 2>/dev/null || true)
     if [ -n "$target" ] && [ -d "$target" ]; then
-      basename "$target"
+      echo "device-number $(basename "$target")"
       return 0
     fi
   fi
@@ -201,7 +210,7 @@ resolve_block_device() {
       if [ -n "$devpath" ]; then
         name=$(basename "$devpath")
         if [ -d "/sys/class/block/$name" ]; then
-          echo "$name"
+          echo "source-path $name"
           return 0
         fi
       fi
@@ -307,11 +316,22 @@ disk_block() {
   # The kernel device behind this mount, however it is named. Falls back to the
   # pool members for ZFS, which has no block device of its own.
   devs=""
-  if kernel_dev=$(resolve_block_device "$abs" "$src"); then
+  RESOLVED_VIA=none
+  if resolved=$(resolve_block_device "$abs" "$src"); then
+    RESOLVED_VIA=${resolved%% *}
+    kernel_dev=${resolved#* }
     devs=$(physical_devices "$kernel_dev" | sort -u)
   elif [ "$fstype" = zfs ]; then
     devs=$(zfs_pool_devices "$src" | sort -u)
+    [ -n "$devs" ] && RESOLVED_VIA=zfs-pool
   fi
+
+  # Which method found the device. Recorded because a silent fallback is
+  # exactly what hid a dead primary path: findmnt pads its MAJ:MIN column, so
+  # the device-number lookup never matched, and every case still resolved
+  # through the source-path fallback. With this field a returned report shows
+  # which path actually ran.
+  kv resolvedVia "$RESOLVED_VIA"
 
   printf '    "physicalDevices": [\n'
   first=1
