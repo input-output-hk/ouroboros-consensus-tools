@@ -1,0 +1,12 @@
+# Prebuilt Praos chain fragments: version 1 of the abstract chain-synthesizer
+# of ouroboros-leios#1048. Degenerate and not a synthesizer at all -- it names
+# fragments to download.
+#
+# A tab-separated table rather than JSON, deliberately: the fetch script reads
+# this, and reading JSON in shell needs jq while writing it does not. The
+# script emits beacon's chain-register.json from these fields.
+#
+# name  file  sha256  bytes  dbDir  configFile  fromSlot  description
+107-praos-768k	107-praos-768k.zip	fbfcc7d3cf036c3452a976a9e8c6faf3b14e0909234b7bdd3a00b2b3ba1c81d4	807507933	db	config.json	1166	19 viable 768k Praos blocks, 2086 value txns each
+1071-praos	1071-praos.zip	c3dc24798698d642e4f6c3ca1d123c595ae3ccf5b8eabac8a745632566678f68	1381379040	db	config.json	1745	135 viable 88k Praos blocks, 236 value txns each
+fschain-6912k	fschain-6912k.zip	fb0778b2f2eda96f10b1c222084d9f898631b1f03ae7d895ad2e5220a1d707d4	801318233	db	config.json	565	34 viable 6912k Praos blocks, 18801 value txns each
