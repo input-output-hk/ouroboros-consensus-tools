@@ -153,6 +153,80 @@ virt_block() {
   printf '    "_": null\n  },\n'
 }
 
+# Resolve a mount to the kernel's name for the block device behind it.
+#
+# Not by taking basename of the mount source: that string is not a device name
+# in most of the interesting cases, and the failure is silent --
+#
+#   LVM / dm-crypt   /dev/mapper/vg-root     basename "vg-root", not in sysfs
+#   btrfs subvolume  /dev/sda2[/home]        basename "home]"
+#   ZFS              rpool/home              basename "home"
+#   NFS              srv:/export/home        basename "home"
+#
+# -- so an LVM machine, which is most of them, reported no disk at all. The
+# device number does not have this problem: the kernel maintains
+# /sys/dev/block/MAJ:MIN for every mount that has a block device behind it.
+resolve_block_device() {
+  path=$1
+
+  # 1. Device number. Handles dm, md, plain partitions and whole disks.
+  majmin=""
+  have findmnt && majmin=$(findmnt -no MAJ:MIN -T "$path" 2>/dev/null | head -1)
+  if [ -z "$majmin" ]; then
+    # st_dev, which Linux packs as
+    #   major = (dev >> 8) & 0xfff
+    #   minor = (dev & 0xff) | ((dev >> 12) & ~0xff)
+    stdev=$(stat -c '%d' "$path" 2>/dev/null || true)
+    [ -n "$stdev" ] && majmin=$(awk -v d="$stdev" 'BEGIN {
+      printf "%d:%d", int(d / 256) % 4096, (d % 256) + int(d / 1048576) * 256
+    }')
+  fi
+  if [ -n "$majmin" ]; then
+    target=$(readlink -f "/sys/dev/block/$majmin" 2>/dev/null || true)
+    if [ -n "$target" ] && [ -d "$target" ]; then
+      basename "$target"
+      return 0
+    fi
+  fi
+
+  # 2. Some filesystems get an anonymous device number (major 0) even though a
+  #    real block device backs them -- btrfs is the common one. Fall back to the
+  #    source string, minus any subvolume suffix, resolved through any symlink
+  #    (/dev/mapper/... points at /dev/dm-N).
+  raw=$2
+  case "$raw" in
+    /dev/*)
+      devpath=${raw%%[*}
+      devpath=$(readlink -f "$devpath" 2>/dev/null || true)
+      if [ -n "$devpath" ]; then
+        name=$(basename "$devpath")
+        if [ -d "/sys/class/block/$name" ]; then
+          echo "$name"
+          return 0
+        fi
+      fi
+      ;;
+  esac
+
+  return 1
+}
+
+# ZFS hides the disks behind a pool, so neither the device number nor the source
+# names anything in sysfs. Ask zpool, which usually needs privileges on Linux --
+# best effort, and said so rather than silently reporting nothing.
+zfs_pool_devices() {
+  pool=${1%%/*}
+  have zpool || { note_unavailable "zpool" "absent; ZFS pool '$pool' members unknown"; return 1; }
+  out=$(zpool status -LP "$pool" 2>/dev/null) || {
+    note_unavailable "zpool status $pool" "failed (usually needs root on Linux); pool members unknown"
+    return 1
+  }
+  printf '%s\n' "$out" | awk '/^\t  \/dev\// { print $1 }' | while read -r d; do
+    n=$(basename "$(readlink -f "$d" 2>/dev/null || echo "$d")")
+    [ -d "/sys/class/block/$n" ] && echo "$n"
+  done
+}
+
 # Resolve a path to the whole physical devices backing it, walking
 # device-mapper and md through to their members.
 physical_devices() {
@@ -230,17 +304,37 @@ disk_block() {
   avail=$(df -Pk "$abs" 2>/dev/null | awk 'NR==2{print $4}')
   [ -n "$avail" ] && kvnum availableKb "$avail"
 
-  base=$(basename "${src:-}")
+  # The kernel device behind this mount, however it is named. Falls back to the
+  # pool members for ZFS, which has no block device of its own.
+  devs=""
+  if kernel_dev=$(resolve_block_device "$abs" "$src"); then
+    devs=$(physical_devices "$kernel_dev" | sort -u)
+  elif [ "$fstype" = zfs ]; then
+    devs=$(zfs_pool_devices "$src" | sort -u)
+  fi
+
   printf '    "physicalDevices": [\n'
   first=1
-  if [ -n "$base" ] && [ -e "/sys/class/block/$base" ]; then
-    for d in $(physical_devices "$base" | sort -u); do
-      [ "$first" = 1 ] || printf ',\n'
-      device_block "$d"
-      first=0
-    done
-  else
-    note_unavailable "/sys/class/block/$base" "device not found in sysfs; is this a network or overlay filesystem?"
+  for d in $devs; do
+    [ "$first" = 1 ] || printf ',\n'
+    device_block "$d"
+    first=0
+  done
+  if [ "$first" = 1 ]; then
+    # Say which filesystem, and whether this is expected. A network, overlay or
+    # in-memory filesystem has no disk to describe; anything else here is a gap
+    # worth reporting back.
+    case "$fstype" in
+      nfs|nfs4|cifs|smb3|fuse.sshfs|overlay|overlayfs|tmpfs|ramfs|9p|virtiofs)
+        note_unavailable "dataDir.physicalDevices" \
+          "$fstype has no backing block device; disk characteristics do not apply" ;;
+      zfs)
+        note_unavailable "dataDir.physicalDevices" \
+          "zfs pool members could not be read; disk characteristics unknown" ;;
+      *)
+        note_unavailable "dataDir.physicalDevices" \
+          "could not resolve a block device for '${src:-unknown}' (${fstype:-unknown filesystem})" ;;
+    esac
   fi
   printf '\n    ],\n'
   printf '    "_": null\n  },\n'

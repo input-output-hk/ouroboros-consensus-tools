@@ -181,6 +181,59 @@ jobs:
           print('  unavailable:', len(d['unavailable']), 'field(s)')
           "
 
+      # The disk section is the point of the hardware report, and it was
+      # resolving the device by basename of the mount source -- which is not a
+      # device name for LVM, dm-crypt, btrfs subvolumes, ZFS or NFS. An SPO on
+      # LVM got no disk at all. A loop-backed device-mapper target reproduces
+      # that shape without needing LVM installed.
+      - name: Hardware report resolves a device-mapper disk
+        run: |
+          set -euo pipefail
+          img=/tmp/glue-dm.img
+          truncate -s 64M "$img"
+          loop=$(sudo losetup -f --show "$img")
+          sectors=$(( 64 * 1024 * 1024 / 512 ))
+          sudo dmsetup create gluetest --table "0 $sectors linear $loop 0"
+          sudo mkfs.ext4 -q /dev/mapper/gluetest
+          sudo mkdir -p /mnt/gluetest
+          sudo mount /dev/mapper/gluetest /mnt/gluetest
+          sudo chmod 777 /mnt/gluetest
+
+          /tmp/tree/scripts/spo-sysinfo.sh /mnt/gluetest > /tmp/dm.json
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/dm.json'))
+          dd = d['dataDir']
+          devs = [x['name'] for x in dd['physicalDevices']]
+          print('source :', dd.get('source'))
+          print('devices:', devs)
+          assert devs, 'no physical device resolved for a device-mapper mount'
+          assert any(n.startswith('loop') for n in devs), \
+              f'expected the backing loop device, got {devs}'
+          assert not [u for u in d['unavailable'] if 'physicalDevices' in u], \
+              'reported physicalDevices as unavailable despite resolving one'
+          "
+
+          # A filesystem with no block device must say so plainly rather than
+          # looking like a failure.
+          /tmp/tree/scripts/spo-sysinfo.sh /dev/shm > /tmp/shm.json
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/shm.json'))
+          assert d['dataDir']['physicalDevices'] == []
+          msg = [u for u in d['unavailable'] if 'physicalDevices' in u]
+          print('tmpfs :', msg)
+          assert msg and 'no backing block device' in msg[0], msg
+          "
+
+      - name: Tear down the test device
+        if: always()
+        run: |
+          sudo umount /mnt/gluetest 2>/dev/null || true
+          sudo dmsetup remove gluetest 2>/dev/null || true
+          sudo losetup -D 2>/dev/null || true
+          rm -f /tmp/glue-dm.img
+
       - name: Build the single-file artifact
         run: |
           set -euo pipefail

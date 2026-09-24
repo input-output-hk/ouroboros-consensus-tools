@@ -176,6 +176,12 @@ directory and re-run to relocate it.
 These are planned and **not** part of the current artifact. They will add host
 requirements when they land:
 
+- **ZFS pool members.** `sysinfo` resolves the disk behind LVM, dm-crypt, md,
+  btrfs subvolumes and plain partitions. ZFS has no block device of its own, so
+  it asks `zpool`, which normally needs root on Linux — run `sysinfo` as root if
+  your data directory is on ZFS and you want the disks identified. Network,
+  overlay and in-memory filesystems have no disk to report, and say so.
+
 - **fuller hardware detail.** `sysinfo` reports what the kernel exposes
   without help. `findmnt` sharpens the filesystem and mount-option fields,
   `systemd-detect-virt` the virtualisation one, and `lscpu` the NUMA count.
