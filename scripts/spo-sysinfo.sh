@@ -49,18 +49,31 @@ kvbool() {
 UNAVAIL=""
 note_unavailable() { UNAVAIL="$UNAVAIL$1: $2\n"; }
 
-# Read a sysfs/procfs file, or record why not.
+# Read a sysfs/procfs file into $SLURP, or set it empty and record why.
+#
+# Deliberately NOT usable as `x=$(slurp path)`: a command substitution runs in a
+# subshell, so note_unavailable would append to that subshell's copy of UNAVAIL
+# and the reason would be discarded. Every per-disk field used to be fetched
+# that way, which meant an unreadable model, scheduler or write_cache vanished
+# with no entry explaining itself -- and those are the fields the report exists
+# for. Call it as a statement, then read $SLURP.
+SLURP=""
 slurp() {
+  SLURP=""
   if [ -r "$1" ]; then
-    tr -d '\n' < "$1"
+    SLURP=$(tr -d '\n' < "$1")
+  elif [ -e "$1" ]; then
+    note_unavailable "$1" "exists but not readable (try root)"
   else
-    if [ -e "$1" ]; then
-      note_unavailable "$1" "exists but not readable (try root)"
-    else
-      note_unavailable "$1" "absent on this kernel"
-    fi
-    printf ''
+    note_unavailable "$1" "absent on this kernel"
   fi
+}
+
+# One queue attribute of $disk. Reads $disk from the caller, which is why it
+# lives beside device_block rather than being called from anywhere else.
+queue_field() {
+  slurp "/sys/block/$disk/queue/$2"
+  printf '        "%s": "%s",\n' "$1" "$(esc "$SLURP")"
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -98,21 +111,21 @@ cpu_block() {
   # These change measured timings materially, which is why they are here and
   # not in a footnote: a powersave governor and a performance one produce
   # different numbers on identical hardware.
-  gov=$(slurp /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)
-  kv scalingGovernor "${gov:-unknown}"
-  drv=$(slurp /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver)
-  kv scalingDriver "${drv:-unknown}"
+  slurp /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+  kv scalingGovernor "${SLURP:-unknown}"
+  slurp /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver
+  kv scalingDriver "${SLURP:-unknown}"
 
   if [ -r /sys/devices/system/cpu/intel_pstate/no_turbo ]; then
-    nt=$(slurp /sys/devices/system/cpu/intel_pstate/no_turbo)
-    kvbool turboEnabled "$([ "$nt" = 0 ] && echo true || echo false)"
+    slurp /sys/devices/system/cpu/intel_pstate/no_turbo
+    if [ "$SLURP" = 0 ]; then kvbool turboEnabled true; else kvbool turboEnabled false; fi
   elif [ -r /sys/devices/system/cpu/cpufreq/boost ]; then
-    b=$(slurp /sys/devices/system/cpu/cpufreq/boost)
-    kvbool turboEnabled "$([ "$b" = 1 ] && echo true || echo false)"
+    slurp /sys/devices/system/cpu/cpufreq/boost
+    if [ "$SLURP" = 1 ]; then kvbool turboEnabled true; else kvbool turboEnabled false; fi
   fi
 
-  smt=$(slurp /sys/devices/system/cpu/smt/control)
-  [ -n "$smt" ] && kv smt "$smt"
+  slurp /sys/devices/system/cpu/smt/control
+  if [ -n "$SLURP" ]; then kv smt "$SLURP"; fi
 
   # Syscall-heavy work pays for these, and a benchmark of block application is
   # syscall-heavy.
@@ -121,7 +134,7 @@ cpu_block() {
     [ -r "$f" ] || continue
     mit="$mit$(basename "$f")=$(tr -d '\n' < "$f"); "
   done
-  [ -n "$mit" ] && kv mitigations "$mit"
+  if [ -n "$mit" ]; then kv mitigations "$mit"; fi
 
   printf '    "_": null\n  },\n'
 }
@@ -131,11 +144,11 @@ memory_block() {
   kvnum totalKb "$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null || echo 0)"
   kvnum swapTotalKb "$(awk '/^SwapTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null || echo 0)"
   # GHC manages its own heap; how the kernel backs it still matters.
-  thp=$(slurp /sys/kernel/mm/transparent_hugepage/enabled)
-  [ -n "$thp" ] && kv transparentHugepages "$thp"
+  slurp /sys/kernel/mm/transparent_hugepage/enabled
+  if [ -n "$SLURP" ]; then kv transparentHugepages "$SLURP"; fi
   if have lscpu; then
     nodes=$(lscpu 2>/dev/null | awk -F': *' '/^NUMA node\(s\)/{print $2; exit}')
-    [ -n "$nodes" ] && kvnum numaNodes "$nodes"
+    if [ -n "$nodes" ]; then kvnum numaNodes "$nodes"; fi
   fi
   printf '    "_": null\n  },\n'
 }
@@ -148,8 +161,8 @@ virt_block() {
     kv detected unknown
   fi
   # Cloud and hypervisor identity, which decides how to read disk figures.
-  kv systemVendor "$(slurp /sys/class/dmi/id/sys_vendor)"
-  kv productName "$(slurp /sys/class/dmi/id/product_name)"
+  slurp /sys/class/dmi/id/sys_vendor;  kv systemVendor "$SLURP"
+  slurp /sys/class/dmi/id/product_name; kv productName "$SLURP"
   printf '    "_": null\n  },\n'
 }
 
@@ -178,17 +191,21 @@ resolve_block_device() {
   # "   0:48 ", which turns the sysfs lookup into /sys/dev/block/   0:48  and
   # never matches. This path silently did nothing until it was tested against a
   # real mount.
-  have findmnt && majmin=$(findmnt --raw -no MAJ:MIN -T "$path" 2>/dev/null |
-    head -1 | tr -d '[:space:]')
+  if have findmnt; then
+    majmin=$(findmnt --raw -no MAJ:MIN -T "$path" 2>/dev/null |
+      head -1 | tr -d '[:space:]')
+  fi
   if [ -z "$majmin" ]; then
     # st_dev, which Linux packs as
     #   major = (dev >> 8) & 0xfff
     #   minor = (dev & 0xff) | ((dev >> 12) & ~0xff)
     stdev=$(stat -c '%d' "$path" 2>/dev/null || true)
     stdev=$(printf '%s' "$stdev" | tr -d '[:space:]')
-    [ -n "$stdev" ] && majmin=$(awk -v d="$stdev" 'BEGIN {
-      printf "%d:%d", int(d / 256) % 4096, (d % 256) + int(d / 1048576) * 256
-    }')
+    if [ -n "$stdev" ]; then
+      majmin=$(awk -v d="$stdev" 'BEGIN {
+        printf "%d:%d", int(d / 256) % 4096, (d % 256) + int(d / 1048576) * 256
+      }')
+    fi
   fi
   if [ -n "$majmin" ]; then
     target=$(readlink -f "/sys/dev/block/$majmin" 2>/dev/null || true)
@@ -232,7 +249,7 @@ zfs_pool_devices() {
   }
   printf '%s\n' "$out" | awk '/^\t  \/dev\// { print $1 }' | while read -r d; do
     n=$(basename "$(readlink -f "$d" 2>/dev/null || echo "$d")")
-    [ -d "/sys/class/block/$n" ] && echo "$n"
+    if [ -d "/sys/class/block/$n" ]; then echo "$n"; fi
   done
 }
 
@@ -240,9 +257,16 @@ zfs_pool_devices() {
 # device-mapper and md through to their members.
 physical_devices() {
   name=$1
+  # Depth guard: device-mapper cannot realistically cycle, but a malformed
+  # slaves link should fail rather than recurse until the shell gives out.
+  depth=${2:-0}
+  if [ "$depth" -gt 8 ]; then
+    note_unavailable "/sys/class/block/$name" "device stack deeper than 8; stopped walking"
+    return 0
+  fi
   if [ -d "/sys/class/block/$name/slaves" ] && [ -n "$(ls -A "/sys/class/block/$name/slaves" 2>/dev/null)" ]; then
     for s in "/sys/class/block/$name/slaves"/*; do
-      physical_devices "$(basename "$s")"
+      physical_devices "$(basename "$s")" "$((depth + 1))"
     done
   elif [ -e "/sys/class/block/$name/partition" ]; then
     # A partition: its parent directory in sysfs is the whole disk.
@@ -257,34 +281,51 @@ device_block() {
   disk=$1
   printf '      {\n'
   printf '        "name": "%s",\n' "$(esc "$disk")"
-  printf '        "model": "%s",\n' "$(esc "$(slurp "/sys/block/$disk/device/model")")"
-  printf '        "vendor": "%s",\n' "$(esc "$(slurp "/sys/block/$disk/device/vendor")")"
-  rot=$(slurp "/sys/block/$disk/queue/rotational")
-  case "$rot" in
+
+  # model and vendor are SCSI/NVMe attributes. virtio-blk and loop devices have
+  # neither, so an empty string here is normal for those and the reason lands in
+  # "unavailable" -- which only works because slurp is called as a statement.
+  slurp "/sys/block/$disk/device/model";  model=$SLURP
+  slurp "/sys/block/$disk/device/vendor"; vendor=$SLURP
+  printf '        "model": "%s",\n' "$(esc "$model")"
+  printf '        "vendor": "%s",\n' "$(esc "$vendor")"
+
+  slurp "/sys/block/$disk/queue/rotational"
+  case "$SLURP" in
     1) printf '        "rotational": true,\n' ;;
     0) printf '        "rotational": false,\n' ;;
     *) printf '        "rotational": null,\n' ;;
   esac
-  sectors=$(slurp "/sys/block/$disk/size")
-  [ -n "$sectors" ] && printf '        "sizeBytes": %s,\n' "$((sectors * 512))"
-  printf '        "scheduler": "%s",\n' "$(esc "$(slurp "/sys/block/$disk/queue/scheduler")")"
-  printf '        "logicalBlockSize": "%s",\n' "$(esc "$(slurp "/sys/block/$disk/queue/logical_block_size")")"
-  printf '        "physicalBlockSize": "%s",\n' "$(esc "$(slurp "/sys/block/$disk/queue/physical_block_size")")"
-  printf '        "nrRequests": "%s",\n' "$(esc "$(slurp "/sys/block/$disk/queue/nr_requests")")"
-  printf '        "readAheadKb": "%s",\n' "$(esc "$(slurp "/sys/block/$disk/queue/read_ahead_kb")")"
+
+  slurp "/sys/block/$disk/size"
+  case "$SLURP" in
+    "" | *[!0-9]*) printf '        "sizeBytes": null,\n' ;;
+    *)             printf '        "sizeBytes": %s,\n' "$((SLURP * 512))" ;;
+  esac
+
+  queue_field scheduler          scheduler
+  queue_field logicalBlockSize   logical_block_size
+  queue_field physicalBlockSize  physical_block_size
+  queue_field nrRequests         nr_requests
+  queue_field readAheadKb        read_ahead_kb
   # Write-back versus write-through dominates fsync-heavy work.
-  printf '        "writeCache": "%s",\n' "$(esc "$(slurp "/sys/block/$disk/queue/write_cache")")"
-  printf '        "discardGranularity": "%s",\n' "$(esc "$(slurp "/sys/block/$disk/queue/discard_granularity")")"
+  queue_field writeCache         write_cache
+  queue_field discardGranularity discard_granularity
 
   # NVMe: the PCIe link bounds achievable throughput regardless of the media.
   case "$disk" in
     nvme*)
+      # nvme0n1 -> nvme0. Multipath names (nvme0c0n1) do not reduce this way,
+      # so the controller lookup is allowed to miss rather than guess.
       ctrl=${disk%%n[0-9]*}
-      printf '        "nvmeFirmware": "%s",\n' "$(esc "$(slurp "/sys/class/nvme/$ctrl/firmware_rev")")"
+      slurp "/sys/class/nvme/$ctrl/firmware_rev"
+      printf '        "nvmeFirmware": "%s",\n' "$(esc "$SLURP")"
       pci=$(readlink -f "/sys/block/$disk/device/device" 2>/dev/null || true)
-      if [ -n "$pci" ] && [ -r "$pci/current_link_speed" ]; then
-        printf '        "pcieLinkSpeed": "%s",\n' "$(esc "$(slurp "$pci/current_link_speed")")"
-        printf '        "pcieLinkWidth": "%s",\n' "$(esc "$(slurp "$pci/current_link_width")")"
+      if [ -n "$pci" ]; then
+        slurp "$pci/current_link_speed"
+        printf '        "pcieLinkSpeed": "%s",\n' "$(esc "$SLURP")"
+        slurp "$pci/current_link_width"
+        printf '        "pcieLinkWidth": "%s",\n' "$(esc "$SLURP")"
       fi
       ;;
   esac
@@ -311,7 +352,7 @@ disk_block() {
   kv mountOptions "${opts:-unknown}"
 
   avail=$(df -Pk "$abs" 2>/dev/null | awk 'NR==2{print $4}')
-  [ -n "$avail" ] && kvnum availableKb "$avail"
+  if [ -n "$avail" ]; then kvnum availableKb "$avail"; fi
 
   # The kernel device behind this mount, however it is named. Falls back to the
   # pool members for ZFS, which has no block device of its own.
@@ -323,7 +364,7 @@ disk_block() {
     devs=$(physical_devices "$kernel_dev" | sort -u)
   elif [ "$fstype" = zfs ]; then
     devs=$(zfs_pool_devices "$src" | sort -u)
-    [ -n "$devs" ] && RESOLVED_VIA=zfs-pool
+    if [ -n "$devs" ]; then RESOLVED_VIA=zfs-pool; fi
   fi
 
   # Which method found the device. Recorded because a silent fallback is
@@ -364,7 +405,7 @@ disk_block() {
 printf '{\n'
 printf '  "schemaVersion": 1,\n'
 printf '  "collectedAt": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf '  "hostname": "%s",\n' "$(esc "$(hostname 2>/dev/null || echo unknown)")"
+printf '  "hostname": "%s",\n' "$(esc "$(uname -n 2>/dev/null || hostname 2>/dev/null || echo unknown)")"
 printf '  "collectedAsRoot": %s,\n' "$([ "$(id -u)" = 0 ] && echo true || echo false)"
 os_block
 cpu_block

@@ -218,6 +218,14 @@ jobs:
               'resolved via ' + str(dd['resolvedVia']) + ', expected device-number'
           assert not [u for u in d['unavailable'] if 'physicalDevices' in u], \
               'reported physicalDevices as unavailable despite resolving one'
+          # A loop device has no SCSI model, so the report must say why the
+          # field is empty. Those reasons used to be generated inside a command
+          # substitution and thrown away with the subshell, so an unreadable
+          # disk field vanished with no explanation at all.
+          reasons = [u for u in d['unavailable'] if '/sys/block/' in u]
+          print('field reasons:', reasons)
+          assert any('device/model' in u for u in reasons), \
+              'no reason recorded for the empty model field'
           PY
 
           # A filesystem with no block device must say so plainly rather than
