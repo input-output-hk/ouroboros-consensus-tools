@@ -200,7 +200,7 @@ jobs:
           sudo chmod 777 /mnt/gluetest
 
           /tmp/tree/scripts/spo-sysinfo.sh /mnt/gluetest > /tmp/dm.json
-          python3 -c "
+          python3 - <<'PY'
           import json
           d = json.load(open('/tmp/dm.json'))
           dd = d['dataDir']
@@ -209,28 +209,29 @@ jobs:
           print('devices:', devs)
           assert devs, 'no physical device resolved for a device-mapper mount'
           assert any(n.startswith('loop') for n in devs), \
-              f'expected the backing loop device, got {devs}'
+              'expected the backing loop device, got ' + repr(devs)
           # The device-number lookup must be what found it. Without this the
           # source-path fallback silently covers for a dead primary path --
-          # which is exactly what happened when findmnt's padded MAJ:MIN column
-          # made every lookup miss, for months, with every case still passing.
+          # which is what happened when the padded MAJ:MIN column made every
+          # lookup miss, for months, with every case still passing.
           assert dd['resolvedVia'] == 'device-number', \
-              f"resolved via {dd['resolvedVia']}, expected device-number"
+              'resolved via ' + str(dd['resolvedVia']) + ', expected device-number'
           assert not [u for u in d['unavailable'] if 'physicalDevices' in u], \
               'reported physicalDevices as unavailable despite resolving one'
-          "
+          PY
 
           # A filesystem with no block device must say so plainly rather than
           # looking like a failure.
           /tmp/tree/scripts/spo-sysinfo.sh /dev/shm > /tmp/shm.json
-          python3 -c "
+          python3 - <<'PY'
           import json
           d = json.load(open('/tmp/shm.json'))
           assert d['dataDir']['physicalDevices'] == []
+          assert d['dataDir']['resolvedVia'] == 'none'
           msg = [u for u in d['unavailable'] if 'physicalDevices' in u]
           print('tmpfs :', msg)
           assert msg and 'no backing block device' in msg[0], msg
-          "
+          PY
 
       - name: Tear down the test device
         if: always()
